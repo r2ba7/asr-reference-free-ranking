@@ -1,53 +1,39 @@
 import torch
-from transformers import AutoProcessor, SeamlessM4Tv2Model
+from transformers import AutoModel, AutoProcessor
 
 from . import LOGGER
 from stt_benchmarking.utils import metrics
 
-
-class SeamlessM4TInference:
-    """
-    A class for loading and running inference with Seamless M4T models.
-    """
-    
-    def __init__(self, device, model_version="v2"):
+class HubertInference:
+    def __init__(self, device):
         """
-        Initialize the SeamlessM4TInference class.
+        Initialize the WhisperInference class.
         
         Args:
             device (str): Device to run the model on ('cuda' or 'cpu')
-            model_version (str): Version of Seamless M4T model to use ('v2')
         """
         self.device = device
-        self.model_version = model_version.lower()
-        
-        if self.model_version not in ['v2']:
-            raise ValueError("model_version must be 'v2' (only v2 is currently supported)")
-        
         self.model, self.processor = self._load_model()
         self.dtype = self.model.dtype
-
+    
     def _load_model(self):
         """
-        Load the Seamless M4T model and processor based on the specified version.
+        Load the Whisper model and processor based on the specified version.
         
         Returns:
             tuple: (model, processor)
         """
-        # Set MODEL_ID based on version
-        if self.model_version == "v2":
-            MODEL_ID = "facebook/seamless-m4t-v2-large"
-        
+        MODEL_ID = "asafaya/hubert-large-arabic-transcribe"
         processor = AutoProcessor.from_pretrained(MODEL_ID)
-        model = SeamlessM4Tv2Model.from_pretrained(
-            MODEL_ID,
+        model = AutoModel.from_pretrained(
+            MODEL_ID, 
             low_cpu_mem_usage=True, 
             use_safetensors=True,
             torch_dtype=torch.float16 if self.device.type == "cuda" else torch.float32
         ).to(self.device)
         
         model.eval()
-        LOGGER.info(f"Loaded Seamless M4T {self.model_version.upper()} Model")
+        LOGGER.info(f"Loaded Hubert Model")
         return model, processor
     
     def run_inference_one_by_one(self, records):
@@ -72,10 +58,10 @@ class SeamlessM4TInference:
 
                 # Ask for text output only
                 with torch.no_grad():
-                    output = self.model.generate(**inputs, generate_speech=False, tgt_lang="arb")
+                    logits = self.model(**inputs).logits
 
-                # Token-level output, decode to string
-                prediction = self.processor.decode(output[0][0].tolist(), skip_special_tokens=True)
+                predicted_ids = torch.argmax(logits, dim=-1)
+                prediction = self.processor.batch_decode(predicted_ids)[0]
 
             except Exception as e:
                 LOGGER.error(f"⚠️ Sample {i+1}, Name: {record['audio_path']}, failed: {e}")
@@ -109,10 +95,3 @@ class SeamlessM4TInference:
     def metrics(self):
         return self.overall_metrics
 
-
-# Example usage:
-# seamless_m4t = SeamlessM4TInference(device="cuda", model_version="v2")
-# 
-# # Run inference
-# metrics = seamless_m4t.run_inference_one_by_one(records)
-# seamless_m4t.summary_of_evaluation()  # Display simple summary

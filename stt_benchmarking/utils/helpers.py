@@ -47,7 +47,7 @@ def load_audio_transcripts(data_dir, is_egy):
             audio_path = os.path.join(waves_dir, audio_filename)  
             if os.path.exists(audio_path):
                 waveform, sample_rate = torchaudio.load(audio_path)
-                waveform = waveform.squeeze().numpy()
+                waveform = waveform.squeeze(0)
                 duration_sec = waveform.shape[-1] / sample_rate
                 samples.append({
                     "audio_path": audio_path,

@@ -1,53 +1,56 @@
 import torch
-from transformers import AutoProcessor, SeamlessM4Tv2Model
+from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 
 from . import LOGGER
 from stt_benchmarking.utils import metrics
 
 
-class SeamlessM4TInference:
+class WhisperInference:
     """
-    A class for loading and running inference with Seamless M4T models.
+    A class for loading and running inference with Whisper models.
+    Supports both Whisper V2 and V3 models.
     """
     
-    def __init__(self, device, model_version="v2"):
+    def __init__(self, device, model_version="v3"):
         """
-        Initialize the SeamlessM4TInference class.
+        Initialize the WhisperInference class.
         
         Args:
             device (str): Device to run the model on ('cuda' or 'cpu')
-            model_version (str): Version of Seamless M4T model to use ('v2')
+            model_version (str): Version of Whisper model to use ('v2' or 'v3')
         """
         self.device = device
         self.model_version = model_version.lower()
-        
-        if self.model_version not in ['v2']:
-            raise ValueError("model_version must be 'v2' (only v2 is currently supported)")
+        if self.model_version not in ['v2', 'v3']:
+            raise ValueError("model_version must be either 'v2' or 'v3'")
         
         self.model, self.processor = self._load_model()
         self.dtype = self.model.dtype
-
+    
     def _load_model(self):
         """
-        Load the Seamless M4T model and processor based on the specified version.
+        Load the Whisper model and processor based on the specified version.
         
         Returns:
             tuple: (model, processor)
         """
         # Set MODEL_ID based on version
         if self.model_version == "v2":
-            MODEL_ID = "facebook/seamless-m4t-v2-large"
+            MODEL_ID = "openai/whisper-large-v2"
+        else:  # v3
+            MODEL_ID = "openai/whisper-large-v3"
         
         processor = AutoProcessor.from_pretrained(MODEL_ID)
-        model = SeamlessM4Tv2Model.from_pretrained(
-            MODEL_ID,
+        model = AutoModelForSpeechSeq2Seq.from_pretrained(
+            MODEL_ID, 
             low_cpu_mem_usage=True, 
             use_safetensors=True,
-            torch_dtype=torch.float16 if self.device.type == "cuda" else torch.float32
+            torch_dtype=torch.float16 if self.device.type == "cuda" else torch.float32 # if self.device.type == "cuda" else torch.float32
         ).to(self.device)
         
+        model.config.forced_decoder_ids = processor.get_decoder_prompt_ids(language="arabic", task="transcribe")
         model.eval()
-        LOGGER.info(f"Loaded Seamless M4T {self.model_version.upper()} Model")
+        LOGGER.info(f"Loaded Whisper {self.model_version.upper()} Model")
         return model, processor
     
     def run_inference_one_by_one(self, records):
@@ -60,22 +63,21 @@ class SeamlessM4TInference:
         """
         all_refs = []
         all_hyps = []
-        
         for i, record in enumerate(records):
             waveform = record["waveform"]
             try:
                 inputs = self.processor(
-                    audios=waveform,
+                    waveform,
                     sampling_rate=record['sample_rate'],
                     return_tensors="pt"
-                ).to(self.device, dtype=self.dtype)
-
-                # Ask for text output only
+                    )
+                input_features = inputs["input_features"].to(self.device, dtype=self.dtype)
                 with torch.no_grad():
-                    output = self.model.generate(**inputs, generate_speech=False, tgt_lang="arb")
+                    generated_ids = self.model.generate(
+                                        input_features=input_features,
+                                    )
 
-                # Token-level output, decode to string
-                prediction = self.processor.decode(output[0][0].tolist(), skip_special_tokens=True)
+                prediction = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
 
             except Exception as e:
                 LOGGER.error(f"⚠️ Sample {i+1}, Name: {record['audio_path']}, failed: {e}")
@@ -92,7 +94,7 @@ class SeamlessM4TInference:
             LOGGER.info(f"Evaluation Metrics: {sample_metrics}")
 
         self.overall_metrics = metrics.S2TMetrics.evaluate(refs=all_refs, hyps=all_hyps)
-
+        
     def summary_of_evaluation(self):
         """
         Display a simple summary of the overall evaluation metrics.
@@ -104,15 +106,19 @@ class SeamlessM4TInference:
         LOGGER.info("Overall Evaluation Summary:")
         for k, v in self.overall_metrics.items():
             LOGGER.info(f"{k}: {v}")
-        
+    
     @property
     def metrics(self):
         return self.overall_metrics
 
 
 # Example usage:
-# seamless_m4t = SeamlessM4TInference(device="cuda", model_version="v2")
+# whisper_v2 = WhisperInference(device="cuda", model_version="v2")
+# whisper_v3 = WhisperInference(device="cuda", model_version="v3")
 # 
 # # Run inference
-# metrics = seamless_m4t.run_inference_one_by_one(records)
-# seamless_m4t.summary_of_evaluation()  # Display simple summary
+# metrics_v2 = whisper_v2.run_inference_one_by_one(records)
+# whisper_v2.summary_of_evaluation()  # Display formatted summary
+# 
+# metrics_v3 = whisper_v3.run_inference_one_by_one(records)
+# whisper_v3.summary_of_evaluation()  # Display formatted summary

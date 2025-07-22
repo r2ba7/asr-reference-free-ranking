@@ -3,8 +3,11 @@ from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
 from tqdm import tqdm
 
 from . import LOGGER
-from stt_benchmarking.utils import metrics, helpers
-
+from stt_benchmarking.utils import (
+    helpers, 
+    decorators, 
+    metrics
+)
 
 class XLSRInference:
     """
@@ -55,7 +58,8 @@ class XLSRInference:
         model.eval()
         LOGGER.info(f"Loaded Wav2Vec2 {self.model_version.upper()} Model")
         return model, processor
-    
+
+    @decorators.Decorators.calculate_execution_time
     def run_inference_one_by_one(self, records):
         """
         Run inference on audio records one by one and compute metrics.

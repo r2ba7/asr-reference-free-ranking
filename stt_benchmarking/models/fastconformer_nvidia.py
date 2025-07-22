@@ -2,7 +2,11 @@ import nemo.collections.asr as nemo_asr
 from tqdm import tqdm
 
 from . import LOGGER
-from stt_benchmarking.utils import metrics, helpers
+from stt_benchmarking.utils import (
+    helpers, 
+    decorators, 
+    metrics
+)
 
 class Fastconformer_hybridInference:
     def __init__(self):
@@ -28,6 +32,7 @@ class Fastconformer_hybridInference:
         LOGGER.info(f"Loaded model stt conformer hybrid")
         return model
     
+    @decorators.Decorators.calculate_execution_time
     def run_inference_one_by_one(self, records):
         """
         Run inference on audio records one by one and compute metrics.

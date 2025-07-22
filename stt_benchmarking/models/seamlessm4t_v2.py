@@ -3,7 +3,11 @@ from transformers import AutoProcessor, SeamlessM4Tv2Model
 from tqdm import tqdm
 
 from . import LOGGER
-from stt_benchmarking.utils import metrics, helpers
+from stt_benchmarking.utils import (
+    helpers, 
+    decorators, 
+    metrics
+)
 
 
 class SeamlessM4TInference:
@@ -52,7 +56,8 @@ class SeamlessM4TInference:
         model.eval()
         LOGGER.info(f"Loaded Seamless M4T {self.model_version.upper()} Model")
         return model, processor
-    
+
+    @decorators.Decorators.calculate_execution_time 
     def run_inference_one_by_one(self, records):
         """
         Run inference on audio records one by one and compute metrics.

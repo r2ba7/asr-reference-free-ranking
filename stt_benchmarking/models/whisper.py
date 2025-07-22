@@ -3,7 +3,11 @@ from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 from tqdm import tqdm
 
 from . import LOGGER
-from stt_benchmarking.utils import metrics, helpers
+from stt_benchmarking.utils import (
+    helpers, 
+    decorators, 
+    metrics
+)
 
 
 class WhisperInference:
@@ -55,7 +59,8 @@ class WhisperInference:
         model.eval()
         LOGGER.info(f"Loaded Whisper {self.model_version.upper()} Model")
         return model, processor
-    
+
+    @decorators.Decorators.calculate_execution_time
     def run_inference_one_by_one(self, records):
         """
         Run inference on audio records one by one and compute metrics.

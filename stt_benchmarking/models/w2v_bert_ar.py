@@ -3,7 +3,11 @@ from transformers import AutoProcessor, AutoModelForCTC
 from tqdm import tqdm
 
 from . import LOGGER
-from stt_benchmarking.utils import metrics, helpers
+from stt_benchmarking.utils import (
+    helpers, 
+    decorators, 
+    metrics
+)
 
 class w2vBERTInference:
     def __init__(self, device):
@@ -36,7 +40,8 @@ class w2vBERTInference:
         model.eval()
         LOGGER.info(f"Loaded model w2v Bert Arabic")
         return model, processor
-    
+
+    @decorators.Decorators.calculate_execution_time
     def run_inference_one_by_one(self, records):
         """
         Run inference on audio records one by one and compute metrics.

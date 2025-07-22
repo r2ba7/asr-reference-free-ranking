@@ -4,3 +4,4 @@ documents/
 __pycache__/
 
 *.py[cod]
+*.docx

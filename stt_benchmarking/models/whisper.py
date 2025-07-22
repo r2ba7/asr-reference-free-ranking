@@ -1,8 +1,9 @@
 import torch
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
+from tqdm import tqdm
 
 from . import LOGGER
-from stt_benchmarking.utils import metrics
+from stt_benchmarking.utils import metrics, helpers
 
 
 class WhisperInference:
@@ -19,14 +20,16 @@ class WhisperInference:
             device (str): Device to run the model on ('cuda' or 'cpu')
             model_version (str): Version of Whisper model to use ('v2' or 'v3')
         """
-        self.device = device
+        self.device = device if isinstance(device, torch.device) else torch.device(device)
         self.model_version = model_version.lower()
         if self.model_version not in ['v2', 'v3']:
             raise ValueError("model_version must be either 'v2' or 'v3'")
         
         self.model, self.processor = self._load_model()
         self.dtype = self.model.dtype
-    
+        self._overall_metrics = None
+        self._samples_info = {}
+
     def _load_model(self):
         """
         Load the Whisper model and processor based on the specified version.
@@ -63,8 +66,13 @@ class WhisperInference:
         """
         all_refs = []
         all_hyps = []
-        for i, record in enumerate(records):
+        if isinstance(records, str):
+            records = [records]
+            
+        for i, record in tqdm(enumerate(records), total=len(records), desc="Processing Records"):
             waveform = record["waveform"]
+            audio_path = record['audio_path']
+            transcription = record['transcription']
             try:
                 inputs = self.processor(
                     waveform,
@@ -73,44 +81,45 @@ class WhisperInference:
                     )
                 input_features = inputs["input_features"].to(self.device, dtype=self.dtype)
                 with torch.no_grad():
-                    generated_ids = self.model.generate(
-                                        input_features=input_features,
-                                    )
+                    generated_ids = self.model.generate(input_features=input_features)
 
                 prediction = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+                predicted_sentence_clean = helpers.clean_arabic_text(prediction)
+                sample_metrics = metrics.S2TMetrics.evaluate(refs=transcription, hyps=predicted_sentence_clean)
 
             except Exception as e:
                 LOGGER.error(f"⚠️ Sample {i+1}, Name: {record['audio_path']}, failed: {e}")
                 continue
 
-            all_refs.append(record["transcription"])
-            all_hyps.append(prediction)
-            sample_metrics = metrics.S2TMetrics.evaluate(refs=record["transcription"], hyps=prediction)
+            all_refs.append(transcription)
+            all_hyps.append(predicted_sentence_clean)
+            self._samples_info[audio_path] = {
+                "transcription": transcription,
+                "prediction": predicted_sentence_clean,
+                "metrics": sample_metrics
+            }
 
-            LOGGER.info("-" * 100)
-            LOGGER.info(f"Sample {i+1}, Name: {record['audio_path']}")
-            LOGGER.info(f"Reference: {record['transcription']}")
-            LOGGER.info(f"Prediction: {prediction}")
-            LOGGER.info(f"Evaluation Metrics: {sample_metrics}")
-
-        self.overall_metrics = metrics.S2TMetrics.evaluate(refs=all_refs, hyps=all_hyps)
+        self._overall_metrics = metrics.S2TMetrics.evaluate(refs=all_refs, hyps=all_hyps)
         
     def summary_of_evaluation(self):
         """
         Display a simple summary of the overall evaluation metrics.
         """
-        if not hasattr(self, 'overall_metrics') or not self.overall_metrics:
+        if not hasattr(self, 'overall_metrics') or not self._overall_metrics:
             LOGGER.warning("No evaluation metrics available. Run inference first.")
             return
         
         LOGGER.info("Overall Evaluation Summary:")
-        for k, v in self.overall_metrics.items():
+        for k, v in self._overall_metrics.items():
             LOGGER.info(f"{k}: {v}")
     
     @property
-    def metrics(self):
-        return self.overall_metrics
+    def overall_metrics(self):
+        return self._overall_metrics
 
+    @property
+    def samples_info(self):
+        return self._samples_info
 
 # Example usage:
 # whisper_v2 = WhisperInference(device="cuda", model_version="v2")

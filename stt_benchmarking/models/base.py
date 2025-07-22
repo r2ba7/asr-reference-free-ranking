@@ -24,4 +24,4 @@ class ModelSelection:
         self.model_object.summary_of_evaluation()
 
     def get_metrics(self):
-        return self.model_object.overall_metrics
+        return self.model_object._overall_metrics

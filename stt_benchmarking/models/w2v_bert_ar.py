@@ -1,31 +1,19 @@
 import torch
-from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
+from transformers import AutoProcessor, AutoModelForCTC
 from tqdm import tqdm
 
 from . import LOGGER
 from stt_benchmarking.utils import metrics, helpers
 
-
-class XLSRInference:
-    """
-    A class for loading and running inference with Wav2Vec2 models.
-    """
-    
-    def __init__(self, device, model_version="xlsr-53", lang_id="ar"):
+class w2vBERTInference:
+    def __init__(self, device):
         """
-        Initialize the Wav2Vec2Inference class.
-        
+        Initialize the HubertArabicInference class.
+
         Args:
-            device (str): Device to run the model on ('cuda' or 'cpu')
-            model_version (str): Version of Wav2Vec2 model to use ('xlsr-53')
-            lang_id (str): Language ID for the model ('ar' for Arabic)
+            device (str or torch.device): Device to run the model on ('cuda' or 'cpu')
         """
         self.device = device if isinstance(device, torch.device) else torch.device(device)
-        self.model_version = model_version.lower()
-        self.lang_id = lang_id
-        if self.model_version not in ['xlsr-53']:
-            raise ValueError("model_version must be 'xlsr-53' (only xlsr-53 is currently supported)")
-        
         self.model, self.processor = self._load_model()
         self.dtype = self.model.dtype
         self._overall_metrics = None
@@ -33,27 +21,20 @@ class XLSRInference:
 
     def _load_model(self):
         """
-        Load the Wav2Vec2 model and processor based on the specified version.
-        
+        Load the HuBERT Arabic model and processor.
+
         Returns:
             tuple: (model, processor)
         """
-        # Set MODEL_ID based on version and language
-        if self.model_version == "xlsr-53" and self.lang_id == "ar":
-            MODEL_ID = "jonatasgrosman/wav2vec2-large-xlsr-53-arabic"
-        else:
-            raise ValueError(f"Unsupported combination: {self.model_version} with {self.lang_id}")
-        
-        processor = Wav2Vec2Processor.from_pretrained(MODEL_ID)
-        model = Wav2Vec2ForCTC.from_pretrained(
-            MODEL_ID, 
-            low_cpu_mem_usage=True, 
-            use_safetensors=True,
+        MODEL_ID = "whitefox123/w2v-bert-2.0-arabic-4"
+        processor = AutoProcessor.from_pretrained(MODEL_ID)
+        model = AutoModelForCTC.from_pretrained(
+            MODEL_ID,
             torch_dtype=torch.float16 if self.device.type == "cuda" else torch.float32
         ).to(self.device)
-        
+
         model.eval()
-        LOGGER.info(f"Loaded Wav2Vec2 {self.model_version.upper()} Model")
+        LOGGER.info(f"Loaded model w2v Bert Arabic")
         return model, processor
     
     def run_inference_one_by_one(self, records):
@@ -72,15 +53,16 @@ class XLSRInference:
             waveform = record["waveform"]
             audio_path = record['audio_path']
             transcription = record['transcription']
+            waveform = record["waveform"]
             try:
                 inputs = self.processor(
-                    waveform,
+                    audio=waveform,
                     sampling_rate=record['sample_rate'],
                     return_tensors="pt",
-                )
-                input_values = inputs['input_values'].to(self.device, dtype=self.dtype)      
+                ).to(self.device, dtype=self.dtype)
+                input_features = inputs["input_features"].to(self.device, dtype=self.dtype)
                 with torch.no_grad():
-                    logits = self.model(input_values).logits
+                    logits = self.model(input_features).logits
 
                 predicted_ids = torch.argmax(logits, dim=-1)
                 predicted_sentence = self.processor.decode(predicted_ids[0])
@@ -90,7 +72,7 @@ class XLSRInference:
             except Exception as e:
                 LOGGER.error(f"⚠️ Sample {i+1}, Name: {record['audio_path']}, failed: {e}")
                 continue
-            
+
             all_refs.append(record["transcription"])
             all_hyps.append(predicted_sentence_clean)
             self._samples_info[audio_path] = {
@@ -100,33 +82,25 @@ class XLSRInference:
             }
 
         self._overall_metrics = metrics.S2TMetrics.evaluate(refs=all_refs, hyps=all_hyps)
-    
+
     def summary_of_evaluation(self):
         """
         Display a simple summary of the overall evaluation metrics.
         """
-        if not hasattr(self, '_overall_metrics') or not self._overall_metrics:
+        if not hasattr(self, 'overall_metrics') or not self._overall_metrics:
             LOGGER.warning("No evaluation metrics available. Run inference first.")
             return
         
         LOGGER.info("Overall Evaluation Summary:")
         for k, v in self._overall_metrics.items():
             LOGGER.info(f"{k}: {v}")
+        
+    @property
+    def overall_metrics(self):
+        return self._overall_metrics
+    
 
     @property
     def samples_info(self):
         return self._samples_info
-   
-    @property
-    def overall_metrics(self):
-        return self._overall_metrics
 
-# Example usage:
-# xlsr_object = XLSRInference(device="cuda", model_version="xlsr-53", lang_id="ar")
-# 
-# # Run inference
-# metrics = xlsr_object.run_inference_one_by_one(records)
-# xlsr_object.summary_of_evaluation()  # Display simple summary
-#
-# # Use clean_arabic_text as a static method
-# cleaned_text = XLSRInference.clean_arabic_text("some arabic text with diacritics")

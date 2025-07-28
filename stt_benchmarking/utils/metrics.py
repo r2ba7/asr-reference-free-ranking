@@ -32,20 +32,41 @@ class S2TMetrics:
         return round(sum(sims) / len(sims), 3)
     
     @staticmethod
-    def wer(refs, hyps):
-        wer_score = jiwer.wer(refs, hyps) * 100
-        return round(min(wer_score, 100.0), 3)
+    def word_accuracy(refs, hyps):
+        wer_score = jiwer.wer(refs, hyps)
+        wer_score = min(wer_score, 1)
+        word_accuracy_metric = 1 - wer_score
+        word_accuracy_metric = round(word_accuracy_metric, 3)
+        return word_accuracy_metric
 
     @staticmethod
-    def cer(refs, hyps):
-        cer_score = jiwer.cer(refs, hyps) * 100
-        return round(min(cer_score, 100.0), 3)
-
+    def character_accuracy(refs, hyps):
+        cer_score = jiwer.cer(refs, hyps)
+        cer_score = min(cer_score, 1)
+        character_accuracy_metric = 1 - cer_score
+        character_accuracy_metric = round(character_accuracy_metric, 3)
+        return character_accuracy_metric
+    
+    @staticmethod
+    def average_metrics(refs, hyps):
+        """
+        Compute the average of all defined similarity metrics.
+        """
+        metrics = S2TMetrics.evaluate(refs, hyps)
+        avg = round(sum(metrics.values()) / len(metrics), 3)
+        metrics["average"] = avg
+        return metrics
+    
     @staticmethod
     def evaluate(refs, hyps):
         refs, hyps = S2TMetrics._normalize_inputs(refs, hyps)
-        return {
-            "wer (%)": S2TMetrics.wer(refs, hyps),
-            "cer (%)": S2TMetrics.cer(refs, hyps),
+
+        metrics = {
+            "word_accuracy": S2TMetrics.word_accuracy(refs, hyps),
+            "char_accuracy": S2TMetrics.character_accuracy(refs, hyps),
             "levenshtein_sim": S2TMetrics.normalized_levenshtein(refs, hyps),
         }
+
+        # Add average of all similarity metrics
+        metrics["average_metric"] = round(sum(metrics.values()) / len(metrics), 3)
+        return metrics

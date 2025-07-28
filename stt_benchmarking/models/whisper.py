@@ -6,7 +6,8 @@ from . import LOGGER
 from stt_benchmarking.utils import (
     helpers, 
     decorators, 
-    metrics
+    metrics,
+    postprocess
 )
 
 
@@ -71,13 +72,16 @@ class WhisperInference:
         """
         all_refs = []
         all_hyps = []
-        if isinstance(records, str):
+        all_audio_paths = []
+        if not isinstance(records, list):
             records = [records]
-            
+        
         for i, record in tqdm(enumerate(records), total=len(records), desc="Processing Records"):
             waveform = record["waveform"]
             audio_path = record['audio_path']
             transcription = record['transcription']
+            normalized_transcription = record['normalized_transcription']
+            all_audio_paths.append(audio_path)
             try:
                 inputs = self.processor(
                     waveform,
@@ -88,21 +92,30 @@ class WhisperInference:
                 with torch.no_grad():
                     generated_ids = self.model.generate(input_features=input_features)
 
-                prediction = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-                predicted_sentence_clean = helpers.clean_arabic_text(prediction)
-                sample_metrics = metrics.S2TMetrics.evaluate(refs=transcription, hyps=predicted_sentence_clean)
+                raw_prediction = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
 
             except Exception as e:
                 LOGGER.error(f"⚠️ Sample {i+1}, Name: {record['audio_path']}, failed: {e}")
                 continue
 
-            all_refs.append(transcription)
-            all_hyps.append(predicted_sentence_clean)
+            all_refs.append(normalized_transcription)
+            all_hyps.append(raw_prediction)
             self._samples_info[audio_path] = {
-                "transcription": transcription,
-                "prediction": predicted_sentence_clean,
-                "metrics": sample_metrics
+                "raw_transcription": transcription,
+                "normalized_transcription": normalized_transcription,
+                "raw_prediction": raw_prediction,
+                "normalized_prediction": None
             }
+
+        all_hyps_normalized = postprocess.normalize_text(all_hyps)     
+        for i, audio_path in enumerate(all_audio_paths):
+            if audio_path in self._samples_info:
+                self._samples_info[audio_path]["normalized_prediction"] = all_hyps_normalized[i]
+                sample_metrics = metrics.S2TMetrics.evaluate(
+                    refs=all_refs[i],
+                    hyps=all_hyps_normalized[i]
+                )
+                self._samples_info[audio_path]["metrics"] = sample_metrics
 
         self._overall_metrics = metrics.S2TMetrics.evaluate(refs=all_refs, hyps=all_hyps)
         

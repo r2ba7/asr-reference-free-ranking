@@ -1,6 +1,5 @@
 import time
 import functools
-import resource
 from typing import Any, Callable
 
 from stt_benchmarking.utils import logger
@@ -32,11 +31,6 @@ class Decorators:
             max_retries = 4
             for attempt in range(max_retries):
                 try:
-                    LOGGER.warning(
-                        f"Attempting to connect to '{func.__name__}' services" 
-                        if attempt == 0 
-                        else f"Attempt: {attempt} to connect to '{func.__name__}' services"
-                    )
                     result = func(*args, **kwargs)
                     return result
                     

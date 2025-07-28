@@ -3,7 +3,7 @@ from tqdm import tqdm
 
 from . import LOGGER
 from stt_benchmarking.utils import (
-    helpers, 
+    postprocess, 
     decorators, 
     metrics
 )
@@ -43,28 +43,42 @@ class Fastconformer_hybridInference:
         """
         all_refs = []
         all_hyps = []
-        if isinstance(records, str):
+        all_audio_paths = []
+        if not isinstance(records, list):
             records = [records]
+            
         for i, record in tqdm(enumerate(records), total=len(records), desc="Processing Records"):
             try:
+                audio_path = record['audio_path']
                 transcription = record['transcription']
-                audio_path = record["audio_path"]
+                normalized_transcription = record['normalized_transcription']
+                all_audio_paths.append(audio_path)
                 output = self.model.transcribe([audio_path])
-                prediction = output[0].text
-                predicted_sentence_clean = helpers.clean_arabic_text(prediction)
-                all_refs.append(transcription)
-                all_hyps.append(predicted_sentence_clean)
-                sample_metrics = metrics.S2TMetrics.evaluate(refs=transcription, hyps=predicted_sentence_clean)
-                self._samples_info[audio_path] = {
-                    "transcription": transcription,
-                    "prediction": predicted_sentence_clean,
-                    "metrics": sample_metrics
-                }
+                raw_prediction = output[0].text
 
             except Exception as e:
                 LOGGER.error(f"⚠️ Sample {i+1}, Name: {audio_path}, failed: {e}")
-                LOGGER.warning(f"{transcription}, {predicted_sentence_clean}")
                 continue
+
+
+            all_refs.append(normalized_transcription)
+            all_hyps.append(raw_prediction)
+            self._samples_info[audio_path] = {
+                "raw_transcription": transcription,
+                "normalized_transcription": normalized_transcription,
+                "raw_prediction": raw_prediction,
+                "normalized_prediction": None
+            }
+
+        all_hyps_normalized = postprocess.normalize_text(all_hyps)     
+        for i, audio_path in enumerate(all_audio_paths):
+            if audio_path in self._samples_info:
+                self._samples_info[audio_path]["normalized_prediction"] = all_hyps_normalized[i]
+                sample_metrics = metrics.S2TMetrics.evaluate(
+                    refs=all_refs[i],
+                    hyps=all_hyps_normalized[i]
+                )
+                self._samples_info[audio_path]["metrics"] = sample_metrics
 
         self._overall_metrics = metrics.S2TMetrics.evaluate(refs=all_refs, hyps=all_hyps)
 

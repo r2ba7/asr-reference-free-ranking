@@ -48,13 +48,13 @@ class S2TMetrics:
         return character_accuracy_metric
     
     @staticmethod
-    def average_metrics(refs, hyps):
+    def mean_score(refs, hyps):
         """
         Compute the average of all defined similarity metrics.
         """
         metrics = S2TMetrics.evaluate(refs, hyps)
         avg = round(sum(metrics.values()) / len(metrics), 3)
-        metrics["average"] = avg
+        metrics["mean_score"] = avg
         return metrics
     
     @staticmethod
@@ -68,5 +68,5 @@ class S2TMetrics:
         }
 
         # Add average of all similarity metrics
-        metrics["average_metric"] = round(sum(metrics.values()) / len(metrics), 3)
+        metrics["mean_score"] = round(sum(metrics.values()) / len(metrics), 3)
         return metrics

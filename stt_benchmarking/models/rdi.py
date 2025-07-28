@@ -2,6 +2,7 @@ import requests
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+from collections import OrderedDict
 
 from tqdm import tqdm
 
@@ -78,7 +79,16 @@ class RDIInference:
                 )
                 self._samples_info[audio_path]["metrics"] = sample_metrics
         
+        self.reorder_samples_info(records=records)
         self._overall_metrics = metrics.S2TMetrics.evaluate(refs=all_refs, hyps=all_hyps_normalized)
+
+    def reorder_samples_info(self, records):
+        ordered_info = OrderedDict()
+        for record in records:
+            audio_path = record["audio_path"]
+            if audio_path in self._samples_info:
+                ordered_info[audio_path] = self._samples_info[audio_path]
+        self._samples_info = ordered_info
 
     def summary_of_evaluation(self):
         """

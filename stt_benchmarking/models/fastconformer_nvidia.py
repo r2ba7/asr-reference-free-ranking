@@ -48,18 +48,17 @@ class Fastconformer_hybridInference:
             records = [records]
             
         for i, record in tqdm(enumerate(records), total=len(records), desc="Processing Records"):
+            audio_path = record['audio_path']
+            transcription = record['transcription']
+            normalized_transcription = record['normalized_transcription']
+            all_audio_paths.append(audio_path)
             try:
-                audio_path = record['audio_path']
-                transcription = record['transcription']
-                normalized_transcription = record['normalized_transcription']
-                all_audio_paths.append(audio_path)
                 output = self.model.transcribe([audio_path])
                 raw_prediction = output[0].text
 
             except Exception as e:
-                LOGGER.error(f"⚠️ Sample {i+1}, Name: {audio_path}, failed: {e}")
+                LOGGER.error(f"Sample {i+1}, Name: {audio_path}, failed: {e}")
                 continue
-
 
             all_refs_normalized.append(normalized_transcription)
             all_hyps.append(raw_prediction)
@@ -70,16 +69,23 @@ class Fastconformer_hybridInference:
                 "normalized_prediction": None
             }
 
-        all_hyps_normalized = text_processing.ArabicTextProcessor.process_texts(all_hyps)     
+        all_hyps_normalized = text_processing.ArabicTextProcessor.process_texts(all_hyps)
         for i, audio_path in enumerate(all_audio_paths):
             if audio_path in self._samples_info:
-                self._samples_info[audio_path]["normalized_prediction"] = all_hyps_normalized[i]
-                sample_metrics = metrics.FilteredS2TMetrics.evaluate(
-                    refs=all_refs_normalized[i],
-                    hyps=all_hyps_normalized[i],
-                    single_sample=True
-                )
-                self._samples_info[audio_path]["metrics"] = sample_metrics
+                try:
+                    self._samples_info[audio_path]["normalized_prediction"] = all_hyps_normalized[i]
+                    sample_metrics = metrics.FilteredS2TMetrics.evaluate(
+                        refs=all_refs_normalized[i],
+                        hyps=all_hyps_normalized[i],
+                        single_sample=True
+                    )
+                    self._samples_info[audio_path]["metrics"] = sample_metrics
+
+                except Exception as e:
+                    LOGGER.error(f"Error processing sample {i+1}, Name: {audio_path}, failed: {e}")
+                    LOGGER.info(f"{self._samples_info[audio_path]}")
+                    self._samples_info.pop(audio_path, None)
+                    continue
 
         self._overall_metrics = metrics.FilteredS2TMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
 

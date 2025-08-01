@@ -2,6 +2,7 @@ from difflib import SequenceMatcher
 from collections import defaultdict
 
 import numpy as np
+from . import LOGGER
 
 class EnsembleInference:
     def __init__(self):
@@ -10,7 +11,7 @@ class EnsembleInference:
     def align_model_records(self, *models, missing_value=None):
         """
         Align samples from multiple models based on common keys.
-        Extracts only normalized_prediction from samples_info.
+        Sorts by audio_path for consistent ordering.
         
         Args:
             *models: Model objects with samples_info attribute
@@ -18,6 +19,7 @@ class EnsembleInference:
         
         Returns:
             dict: {accuracy: [normalized_predictions_list]} where all lists have same length
+            Also sets self.sorted_audio_paths for reference
         """
         if not models:
             return {}
@@ -28,8 +30,8 @@ class EnsembleInference:
             if hasattr(model, 'samples_info') and model.samples_info:
                 all_keys.update(model.samples_info.keys())
         
-        # Sort keys for consistent ordering
-        sorted_keys = sorted(all_keys)        
+        # Sort keys (audio_paths) alphabetically for consistent ordering
+        self.sorted_audio_paths = sorted(all_keys)
         
         for model in models:
             # Get model accuracy
@@ -40,21 +42,19 @@ class EnsembleInference:
             if accuracy is None:
                 continue  # Skip models without accuracy
             
-            # Align samples - extract raw_prediction only
+            # Align samples - extract raw_prediction only, sorted by audio_path
             aligned_samples = []
-            for key in sorted_keys:
+            for audio_path in self.sorted_audio_paths:
                 if (hasattr(model, 'samples_info') and 
                     model.samples_info and 
-                    key in model.samples_info):
-                    sample = model.samples_info[key].get('raw_prediction', missing_value)
+                    audio_path in model.samples_info):
+                    sample = model.samples_info[audio_path].get('raw_prediction', missing_value)
                 else:
                     sample = missing_value
                 
                 aligned_samples.append(sample)
             
             self.input_to_fusion[accuracy] = aligned_samples
-        
-        self.input_to_fusion
     
     @staticmethod
     def compute_weights(accuracies):
@@ -68,7 +68,6 @@ class EnsembleInference:
             np.array: Normalized weights (higher weight for higher accuracy)
         """
         accuracies = np.array(accuracies)
-        # Ensure positive weights, handle zero accuracies
         weights = np.maximum(accuracies, 1e-10)
         weights = weights / weights.sum()
         return weights
@@ -160,11 +159,6 @@ class EnsembleInference:
         
         # Use smart insertion to place tokens at logical positions
         enhanced_ref = EnsembleInference.smart_insert_tokens(consensus_ref, additional_info, versions)
-        
-        print(f"  Enhanced reference with: {additional_info}")
-        print(f"  Original: {consensus_ref}")
-        print(f"  Enhanced: {enhanced_ref}")
-        
         return enhanced_ref
 
     def get_consensus_reference(self, versions):
@@ -268,11 +262,9 @@ class EnsembleInference:
         # If enhanced reference is still significantly shorter than average, 
         # use filtered longest as fallback
         if enhanced_ref and len(enhanced_ref) >= avg_length * 0.8:
-            print(f"  Using enhanced consensus reference: {len(enhanced_ref)} tokens")
             return enhanced_ref
         else:
             filtered_longest = self.get_filtered_longest(versions)
-            print(f"  Enhanced consensus still too short, using filtered longest: {len(filtered_longest)} tokens")
             return filtered_longest
 
     def find_first_common_word(self, reference_tokens, candidate_tokens):
@@ -320,7 +312,6 @@ class EnsembleInference:
         
         if ref_anchor is None:
             # No common words - use position-based alignment (first-to-first)
-            print(f"  No common words found, using position-based alignment")
             min_length = min(len(reference_tokens), len(candidate_tokens))
             
             for i in range(min_length):
@@ -335,7 +326,6 @@ class EnsembleInference:
             return operations, candidate_values
         
         # Use anchor-based alignment
-        print(f"  Common word found: '{reference_tokens[ref_anchor]}' at positions ({ref_anchor}, {cand_anchor})")
         
         # Align from the anchor point onwards using SequenceMatcher
         ref_suffix = reference_tokens[ref_anchor:]
@@ -409,9 +399,13 @@ class EnsembleInference:
             # Extract tokenized sentences for position i
             versions = []
             for sent_list in sentence_lists:
-                sent = sent_list[i].strip()
-                tokens = sent.split() if sent else []
-                versions.append(tokens)
+                try:
+                    sent = sent_list[i].strip()
+                    tokens = sent.split() if sent else []
+                    versions.append(tokens)
+                except Exception as e:
+                    LOGGER.error(f"Error processing sentence {i+1}, failed: {e}")
+                    versions.append([])
             
             # Select optimal reference using consensus + filtered longest
             reference = self.get_optimal_reference(versions)
@@ -531,13 +525,13 @@ class EnsembleInference:
         sentence_lists = [sents for _, sents in sorted_items]
         
         # Step 1: Align all sentences
-        print("Step 1: Aligning sentences...")
+        LOGGER.info("Step 1: Aligning sentences...")
         aligned_results = self.align_all_sentences(sentence_lists)
         
         # Step 2: Compute weights based on accuracies
         weights = self.compute_weights(accuracies)
         
         # Step 3: Fuse aligned sentences using weighted voting
-        print("Step 2: Fusing aligned sentences...")
+        LOGGER.info("Step 2: Fusing aligned sentences...")
         fused_sentences = self.fuse_aligned_sentences(aligned_results, weights)
         return fused_sentences

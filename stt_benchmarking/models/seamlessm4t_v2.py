@@ -128,7 +128,7 @@ class SeamlessM4TInference:
             LOGGER.info(f"{k}: {v}")
         
     @property
-    def _verall_metrics(self):
+    def overall_metrics(self):
         return self._overall_metrics
 
     @property

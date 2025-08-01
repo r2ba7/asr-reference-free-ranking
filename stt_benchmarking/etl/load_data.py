@@ -2,7 +2,7 @@ import os
 
 import torchaudio
 
-from stt_benchmarking.utils import postprocess
+from stt_benchmarking.utils import text_processing
 
 def load_audio_transcripts(data_dir, is_egy):
     if not os.path.isdir(data_dir):
@@ -54,8 +54,7 @@ def load_audio_transcripts(data_dir, is_egy):
 
     # Bulk normalize all transcriptions at once
     if transcriptions:
-        normalized_transcriptions = postprocess.normalize_text(transcriptions)
-        
+        normalized_transcriptions = text_processing.ArabicTextProcessor.process_texts(transcriptions)
         # Reinsert normalized transcriptions back into samples
         for i, sample in enumerate(samples):
             sample["normalized_transcription"] = normalized_transcriptions[i]

@@ -5,7 +5,56 @@ import numpy as np
 
 class EnsembleInference:
     def __init__(self):
-        pass
+        self.input_to_fusion = {}
+    
+    def align_model_records(self, *models, missing_value=None):
+        """
+        Align samples from multiple models based on common keys.
+        Extracts only normalized_prediction from samples_info.
+        
+        Args:
+            *models: Model objects with samples_info attribute
+            missing_value: Value to use when a model doesn't have a specific key (default: None)
+        
+        Returns:
+            dict: {accuracy: [normalized_predictions_list]} where all lists have same length
+        """
+        if not models:
+            return {}
+        
+        # Get all unique sample keys across all models
+        all_keys = set()
+        for model in models:
+            if hasattr(model, 'samples_info') and model.samples_info:
+                all_keys.update(model.samples_info.keys())
+        
+        # Sort keys for consistent ordering
+        sorted_keys = sorted(all_keys)        
+        
+        for model in models:
+            # Get model accuracy
+            accuracy = None
+            if hasattr(model, 'overall_metrics') and model.overall_metrics:
+                accuracy = model.overall_metrics.get('average_score')
+            
+            if accuracy is None:
+                continue  # Skip models without accuracy
+            
+            # Align samples - extract raw_prediction only
+            aligned_samples = []
+            for key in sorted_keys:
+                if (hasattr(model, 'samples_info') and 
+                    model.samples_info and 
+                    key in model.samples_info):
+                    sample = model.samples_info[key].get('raw_prediction', missing_value)
+                else:
+                    sample = missing_value
+                
+                aligned_samples.append(sample)
+            
+            self.input_to_fusion[accuracy] = aligned_samples
+        
+        self.input_to_fusion
     
     @staticmethod
     def compute_weights(accuracies):
@@ -462,7 +511,7 @@ class EnsembleInference:
         
         return fused_sentences
 
-    def ensemble_texts(self, accuracy_to_sentences: dict):
+    def ensemble_texts(self):
         """
         Ensemble texts by first aligning then fusing sentences.
         
@@ -474,7 +523,10 @@ class EnsembleInference:
             list: List of final ensembled sentences
         """
         # Sort accuracies (descending - best first) and extract sentences
-        sorted_items = sorted(accuracy_to_sentences.items(), key=lambda x: x[0], reverse=True)
+        if not self.input_to_fusion:
+            raise ValueError("Run EnsembleInference.align_model_records first.")
+        
+        sorted_items = sorted(self.input_to_fusion.items(), key=lambda x: x[0], reverse=True)
         accuracies = [a for a, _ in sorted_items]
         sentence_lists = [sents for _, sents in sorted_items]
         
@@ -488,5 +540,4 @@ class EnsembleInference:
         # Step 3: Fuse aligned sentences using weighted voting
         print("Step 2: Fusing aligned sentences...")
         fused_sentences = self.fuse_aligned_sentences(aligned_results, weights)
-        
         return fused_sentences

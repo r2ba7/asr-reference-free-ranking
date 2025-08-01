@@ -7,7 +7,7 @@ from stt_benchmarking.utils import (
     helpers, 
     decorators, 
     metrics,
-    postprocess
+    text_processing
 )
 
 
@@ -70,7 +70,7 @@ class WhisperInference:
             records (list): List of audio records containing waveform, sample_rate, 
                           transcription, and audio_path
         """
-        all_refs = []
+        all_refs_normalized = []
         all_hyps = []
         all_audio_paths = []
         if not isinstance(records, list):
@@ -98,7 +98,7 @@ class WhisperInference:
                 LOGGER.error(f"⚠️ Sample {i+1}, Name: {record['audio_path']}, failed: {e}")
                 continue
 
-            all_refs.append(normalized_transcription)
+            all_refs_normalized.append(normalized_transcription)
             all_hyps.append(raw_prediction)
             self._samples_info[audio_path] = {
                 "raw_transcription": transcription,
@@ -107,17 +107,18 @@ class WhisperInference:
                 "normalized_prediction": None
             }
 
-        all_hyps_normalized = postprocess.normalize_text(all_hyps)     
+        all_hyps_normalized =  text_processing.ArabicTextProcessor.process_texts(all_hyps)     
         for i, audio_path in enumerate(all_audio_paths):
             if audio_path in self._samples_info:
                 self._samples_info[audio_path]["normalized_prediction"] = all_hyps_normalized[i]
-                sample_metrics = metrics.S2TMetrics.evaluate(
-                    refs=all_refs[i],
-                    hyps=all_hyps_normalized[i]
+                sample_metrics = metrics.FilteredS2TMetrics.evaluate(
+                    refs=all_refs_normalized[i],
+                    hyps=all_hyps_normalized[i],
+                    single_sample=True
                 )
                 self._samples_info[audio_path]["metrics"] = sample_metrics
 
-        self._overall_metrics = metrics.S2TMetrics.evaluate(refs=all_refs, hyps=all_hyps)
+        self._overall_metrics = metrics.FilteredS2TMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
         
     def summary_of_evaluation(self):
         """

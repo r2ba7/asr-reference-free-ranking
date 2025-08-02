@@ -7,7 +7,6 @@ import random
 from collections import defaultdict
 import numpy as np
 
-
 def sample_records_by_duration_buckets(records, bucket_size=10, no_samples=50, seed=None):
     """
     Sample records proportionally from duration buckets.

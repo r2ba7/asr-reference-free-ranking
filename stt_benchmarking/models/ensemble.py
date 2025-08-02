@@ -1,5 +1,6 @@
 from difflib import SequenceMatcher
 from collections import defaultdict
+from itertools import islice
 
 import numpy as np
 from . import LOGGER
@@ -48,7 +49,7 @@ class EnsembleInference:
                 if (hasattr(model, 'samples_info') and 
                     model.samples_info and 
                     audio_path in model.samples_info):
-                    sample = model.samples_info[audio_path].get('raw_prediction', missing_value)
+                    sample = model.samples_info[audio_path].get('normalized_prediction', missing_value)
                 else:
                     sample = missing_value
                 
@@ -297,6 +298,8 @@ class EnsembleInference:
         Returns:
             tuple: (operations, candidate_values) where both are same length as reference
         """
+        # print(reference_tokens, candidate_tokens)
+        # print("----")
         if not candidate_tokens:
             return (["<DELETE>"] * len(reference_tokens), 
                     [None] * len(reference_tokens))
@@ -309,7 +312,6 @@ class EnsembleInference:
         
         # Find first common word as anchor
         ref_anchor, cand_anchor = self.find_first_common_word(reference_tokens, candidate_tokens)
-        
         if ref_anchor is None:
             # No common words - use position-based alignment (first-to-first)
             min_length = min(len(reference_tokens), len(candidate_tokens))
@@ -327,13 +329,58 @@ class EnsembleInference:
         
         # Use anchor-based alignment
         
-        # Align from the anchor point onwards using SequenceMatcher
+        # 1. ALIGN PREFIX (before anchor) - NEW LOGIC
+        if ref_anchor > 0 or cand_anchor > 0:
+            ref_prefix = reference_tokens[:ref_anchor]
+            cand_prefix = candidate_tokens[:cand_anchor]
+            
+            prefix_matcher = SequenceMatcher(None, ref_prefix, cand_prefix)
+            
+            for tag, i1, i2, j1, j2 in prefix_matcher.get_opcodes():
+                if tag == 'equal':
+                    # Tokens match exactly
+                    for i, j in zip(range(i1, i2), range(j1, j2)):
+                        operations[i] = "<KEEP>"
+                        candidate_values[i] = reference_tokens[i]
+                        
+                elif tag == 'replace':
+                    ref_span = i2 - i1
+                    cand_span = j2 - j1
+                    
+                    if ref_span == cand_span:
+                        # 1-to-1 substitution
+                        for i, j in zip(range(i1, i2), range(j1, j2)):
+                            operations[i] = "<SUBSTITUTE>"
+                            candidate_values[i] = candidate_tokens[j]
+                    elif ref_span > cand_span:
+                        # Multiple reference tokens -> fewer candidate tokens
+                        if cand_span > 0:
+                            operations[i1] = "<MERGE>"
+                            candidate_values[i1] = candidate_tokens[j1:j2]
+                            # Remaining positions stay as <DELETE>
+                        # else: positions stay as <DELETE>
+                    else:
+                        # Fewer reference -> more candidate tokens
+                        for i, j in zip(range(i1, i2), range(j1, j1 + ref_span)):
+                            operations[i] = "<SUBSTITUTE>"
+                            candidate_values[i] = candidate_tokens[j]
+                            
+                elif tag == 'delete':
+                    # Reference tokens are deleted (already initialized as <DELETE>)
+                    pass
+                    
+                elif tag == 'insert':
+                    # Candidate has extra tokens - these are ignored in this alignment approach
+                    # since we're aligning candidate TO reference structure
+                    pass
+        
+        # 2. ALIGN SUFFIX (from anchor onwards) - EXISTING LOGIC
         ref_suffix = reference_tokens[ref_anchor:]
         cand_suffix = candidate_tokens[cand_anchor:]
         
-        matcher = SequenceMatcher(None, ref_suffix, cand_suffix)
+        suffix_matcher = SequenceMatcher(None, ref_suffix, cand_suffix)
         
-        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        for tag, i1, i2, j1, j2 in suffix_matcher.get_opcodes():
             # Adjust indices to account for the anchor offset
             ref_start = ref_anchor + i1
             ref_end = ref_anchor + i2
@@ -372,8 +419,9 @@ class EnsembleInference:
                 # Reference tokens are deleted (already initialized as <DELETE>)
                 pass
                 
-        # Everything before the anchor in reference should be <DELETE> (already set)
-        # Everything before the anchor in candidate is ignored
+            elif tag == 'insert':
+                # Candidate has extra tokens - ignored in this alignment approach
+                pass
         
         return operations, candidate_values
     
@@ -394,22 +442,24 @@ class EnsembleInference:
                 sents.append("")
         
         aligned_results = []
-        
         for i in range(num_sentences):
-            # Extract tokenized sentences for position i
             versions = []
             for sent_list in sentence_lists:
                 try:
                     sent = sent_list[i].strip()
                     tokens = sent.split() if sent else []
                     versions.append(tokens)
+
                 except Exception as e:
                     LOGGER.error(f"Error processing sentence {i+1}, failed: {e}")
                     versions.append([])
+                # print(tokens)
             
+            # print("Versions:", versions)
             # Select optimal reference using consensus + filtered longest
+            # Reference is correct
             reference = self.get_optimal_reference(versions)
-            
+            # print("Reference:", reference)
             # Align all versions to the reference
             sentence_alignments = []
             for tokens in versions:
@@ -423,7 +473,7 @@ class EnsembleInference:
                 'reference': reference,
                 'alignments': sentence_alignments
             })
-        
+            # break
         return aligned_results
 
     def fuse_aligned_sentences(self, aligned_results, weights):
@@ -441,12 +491,13 @@ class EnsembleInference:
         
         for result in aligned_results:
             reference = result['reference']
+            # print(reference)
             alignments = result['alignments']
-            
+            # print(alignments)
             if not reference:
                 fused_sentences.append("")
                 continue
-            
+            # print('---')
             # Initialize voting matrices
             alignment_matrix = [defaultdict(float) for _ in range(len(reference))]
             operation_matrix = [defaultdict(float) for _ in range(len(reference))]
@@ -523,15 +574,518 @@ class EnsembleInference:
         sorted_items = sorted(self.input_to_fusion.items(), key=lambda x: x[0], reverse=True)
         accuracies = [a for a, _ in sorted_items]
         sentence_lists = [sents for _, sents in sorted_items]
-        
-        # Step 1: Align all sentences
+        # Compute weights based on accuracies
+        weights = self.compute_weights(accuracies)
+        # Align all sentences
         LOGGER.info("Step 1: Aligning sentences...")
         aligned_results = self.align_all_sentences(sentence_lists)
-        
-        # Step 2: Compute weights based on accuracies
-        weights = self.compute_weights(accuracies)
-        
-        # Step 3: Fuse aligned sentences using weighted voting
+        # Fuse aligned sentences using weighted voting
         LOGGER.info("Step 2: Fusing aligned sentences...")
         fused_sentences = self.fuse_aligned_sentences(aligned_results, weights)
         return fused_sentences
+    
+
+class EnsembleInferenceOld:
+    def __init__(self):
+        pass
+    
+    @staticmethod
+    def compute_weights(accuracies):
+        """
+        Compute model weights based on inverse error scores.
+        
+        Args:
+            errors (list): List of error scores for each model
+            
+        Returns:
+            np.array: Normalized weights (higher weight for lower error)
+        """
+        accuracies = np.array(accuracies)
+        weights = np.maximum(accuracies, 1e-10)
+        weights = weights / weights.sum()
+        return weights
+    
+    @staticmethod
+    def find_common_anchors(reference_tokens, candidate_tokens):
+        """
+        Find common words between reference and candidate to use as alignment anchors.
+        
+        Args:
+            reference_tokens (list): Reference sentence tokens
+            candidate_tokens (list): Candidate sentence tokens
+            
+        Returns:
+            list: List of (ref_idx, cand_idx) tuples for anchor points
+        """
+        anchors = []
+        used_cand_indices = set()
+        
+        for ref_idx, ref_token in enumerate(reference_tokens):
+            for cand_idx, cand_token in enumerate(candidate_tokens):
+                if (ref_token.lower() == cand_token.lower() and 
+                    cand_idx not in used_cand_indices):
+                    anchors.append((ref_idx, cand_idx))
+                    used_cand_indices.add(cand_idx)
+                    break
+        
+        return anchors
+    
+    def align_sentences(self, reference_tokens, candidate_tokens):
+        """
+        Align candidate to reference using SequenceMatcher but maintain reference length.
+        Returns operation tokens and candidate values for each reference position.
+        
+        Args:
+            reference_tokens (list): Reference sentence tokens (longest sentence)
+            candidate_tokens (list): Candidate sentence tokens to align
+            
+        Returns:
+            tuple: (operations, candidate_values) where both are same length as reference
+                   operations: list of operation types (<KEEP>, <SUBSTITUTE>, <DELETE>, <MERGE>)
+                   candidate_values: list of candidate tokens or None for each position
+        """
+        if not candidate_tokens:
+            return (["<DELETE>"] * len(reference_tokens), 
+                    [None] * len(reference_tokens))
+        
+        if not reference_tokens:
+            return ([], [])
+        
+        # Use SequenceMatcher to get alignment operations
+        matcher = SequenceMatcher(None, reference_tokens, candidate_tokens)
+        operations = ["<DELETE>"] * len(reference_tokens)
+        candidate_values = [None] * len(reference_tokens)
+        
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag == 'equal':
+                # Tokens match exactly - keep reference tokens
+                for i in range(i1, i2):
+                    operations[i] = "<KEEP>"
+                    candidate_values[i] = reference_tokens[i]  # Same as reference
+                    
+            elif tag == 'replace':
+                ref_span = i2 - i1
+                cand_span = j2 - j1
+                
+                if ref_span == cand_span:
+                    # 1-to-1 substitution
+                    for i, j in zip(range(i1, i2), range(j1, j2)):
+                        operations[i] = "<SUBSTITUTE>"
+                        candidate_values[i] = candidate_tokens[j]
+                elif ref_span > cand_span:
+                    # Multiple reference tokens -> fewer candidate tokens (merge scenario)
+                    # Mark first position as MERGE with all candidate tokens
+                    if cand_span > 0:
+                        operations[i1] = "<MERGE>"
+                        candidate_values[i1] = candidate_tokens[j1:j2]  # List of tokens
+                        # Mark remaining reference positions as DELETE
+                        for i in range(i1 + 1, i2):
+                            operations[i] = "<DELETE>"
+                            candidate_values[i] = None
+                    else:
+                        # No candidate tokens - all deletes
+                        for i in range(i1, i2):
+                            operations[i] = "<DELETE>"
+                            candidate_values[i] = None
+                else:
+                    # Fewer reference tokens -> more candidate tokens
+                    # This shouldn't happen since reference is longest, but handle it
+                    for i, j in zip(range(i1, i2), range(j1, j1 + ref_span)):
+                        operations[i] = "<SUBSTITUTE>"
+                        candidate_values[i] = candidate_tokens[j]
+                    
+            elif tag == 'delete':
+                # Reference tokens are deleted
+                for i in range(i1, i2):
+                    operations[i] = "<DELETE>"
+                    candidate_values[i] = None
+                    
+            elif tag == 'insert':
+                # This should never happen since reference is longest
+                pass
+        
+        return operations, candidate_values
+    
+    def align_all_sentences(self, sentence_lists):
+        """
+        Align all sentence lists using the longest sentence as reference.
+        
+        Args:
+            sentence_lists (list): List of sentence lists from different models
+            
+        Returns:
+            list: List of alignment results for each sentence position
+        """
+        # Handle missing sentences by padding with empty strings
+        num_sentences = max(len(sents) for sents in sentence_lists)
+        for sents in sentence_lists:
+            while len(sents) < num_sentences:
+                sents.append("")
+        
+        aligned_results = []
+        
+        for i in range(num_sentences):
+            # Extract tokenized sentences for position i
+            versions = []
+            for sent_list in sentence_lists:
+                sent = sent_list[i].strip()
+                tokens = sent.split() if sent else []
+                versions.append(tokens)
+            
+            # Select longest sentence as reference
+            reference = max(versions, key=len, default=[])
+            
+            # Align all versions to the reference
+            sentence_alignments = []
+            for tokens in versions:
+                operations, candidate_values = self.align_sentences(reference, tokens)
+                sentence_alignments.append({
+                    'operations': operations,
+                    'candidate_values': candidate_values
+                })
+            
+            aligned_results.append({
+                'reference': reference,
+                'alignments': sentence_alignments
+            })
+        
+        return aligned_results
+
+class EnsembleInferenceRefactored:
+    def __init__(self):
+        self._input_to_fusion = {}
+    
+    @staticmethod
+    def compute_weights(accuracies):
+        """
+        Compute model weights based on inverse error scores.
+        
+        Args:
+            errors (list): List of error scores for each model
+            
+        Returns:
+            np.array: Normalized weights (higher weight for lower error)
+        """
+        accuracies = np.array(accuracies)
+        weights = np.maximum(accuracies, 1e-10)
+        weights = weights / weights.sum()
+        return weights
+    
+    def combine_models_transcriptions(self, *models, missing_value=None):
+        """
+        Align samples from multiple models based on common keys.
+        Sorts by audio_path for consistent ordering.
+        
+        Args:
+            *models: Model objects with samples_info attribute
+            missing_value: Value to use when a model doesn't have a specific key (default: None)
+        
+        Returns:
+            dict: {accuracy: [normalized_predictions_list]} where all lists have same length
+            Also sets self.sorted_audio_paths for reference
+        """
+        if not models:
+            return {}
+        
+        # Get all unique sample keys across all models
+        all_keys = set()
+        for model in models:
+            if hasattr(model, 'samples_info') and model.samples_info:
+                all_keys.update(model.samples_info.keys())
+        
+        # Sort keys (audio_paths) alphabetically for consistent ordering
+        self.sorted_audio_paths = sorted(all_keys)
+        
+        for model in models:
+            # Get model accuracy
+            accuracy = None
+            if hasattr(model, 'overall_metrics') and model.overall_metrics:
+                accuracy = model.overall_metrics.get('average_score')
+            
+            if accuracy is None:
+                continue  # Skip models without accuracy
+            
+            # Align samples - extract raw_prediction only, sorted by audio_path
+            aligned_samples = []
+            for audio_path in self.sorted_audio_paths:
+                if (hasattr(model, 'samples_info') and 
+                    model.samples_info and 
+                    audio_path in model.samples_info):
+                    sample = model.samples_info[audio_path].get('normalized_prediction', missing_value)
+                else:
+                    sample = missing_value
+                
+                aligned_samples.append(sample)
+            
+            self._input_to_fusion[accuracy] = aligned_samples
+
+    # Done reference
+    def get_reference_from_transcriptions(self, transcriptions):
+        def get_longest_reference(transcriptions):
+            def find_first_anchors(reference_sentence, compared_sentence):
+                ref_words = reference_sentence.split()
+                comp_words = compared_sentence.split()
+                for i, ref_word in enumerate(ref_words):
+                    for j, comp_word in enumerate(comp_words):
+                        if ref_word == comp_word:
+                            return (i, j)
+                return None
+            
+            valid_transcriptions = [t for t in transcriptions if t is not None]
+            if not valid_transcriptions:
+                return False, None
+            
+            longest_reference = max(valid_transcriptions, key=len)
+            # print(f"Reference (longest): {longest_reference}")
+            
+            successful_alignments = 0
+            longest_index = valid_transcriptions.index(longest_reference)
+            for i, transcription in enumerate(valid_transcriptions):
+                if i != longest_index:  # Compare by index, not content
+                    # print(f"Comparing: {transcription}")
+                    anchors = find_first_anchors(longest_reference, transcription)
+                    if anchors:
+                        successful_alignments += 1
+                        # print(f"  Anchors found at positions: {anchors}")
+                    else:
+                        pass
+                        # print(f"  No anchors found")
+            
+            total_comparisons = len(valid_transcriptions) - 1
+            success = successful_alignments >= (total_comparisons / 2) if total_comparisons > 0 else True
+            # print(f"Alignment success: {success} ({successful_alignments}/{total_comparisons})")
+            return success, longest_reference
+                
+        def get_common_words_reference(transcriptions):
+            def count_common_words(transcription1, transcription2):
+                words1 = set(transcription1.split())
+                words2 = set(transcription2.split())
+                return len(words1.intersection(words2))
+            
+            valid_transcriptions = [t for t in transcriptions if t is not None]
+            if len(valid_transcriptions) <= 1:
+                # print("Not enough valid transcriptions for common words alignment")
+                return False, None
+            
+
+            best_total_common = -1
+            best_reference = None
+            for i, transcription_i in enumerate(valid_transcriptions):
+                total_common_words = 0
+                # print(f"\nAnalyzing: '{transcription_i}'")
+                for j, transcription_j in enumerate(valid_transcriptions):
+                    if i != j:  # Compare by index, not content
+                        common_count = count_common_words(transcription_i, transcription_j)
+                        total_common_words += common_count
+                        # print(f"  vs '{transcription_j}': {common_count} common words")
+                
+                # print(f"  Total common words: {total_common_words}")
+                if total_common_words > best_total_common:
+                    best_total_common = total_common_words
+                    best_reference = transcription_i
+            
+            if best_reference and best_total_common > 0:
+                # print(f"\nSelected reference with {best_total_common} total common words")
+                # print(f"Reference: '{best_reference}'")
+                return True, best_reference
+            
+            # print("No common words found between any transcriptions")
+            return False, None
+
+        valid_transcriptions = [t for t in transcriptions if t is not None]
+        if not valid_transcriptions:
+            # print("No valid transcriptions found")
+            return None
+        
+        longest_success, longest_reference = get_longest_reference(transcriptions)
+        if longest_success:
+            # print("Proceeding with longest reference...")
+            return longest_reference
+        else:
+            # print("Longest alignment failed, using common words fallback...")
+            common_words_success, common_words_reference = get_common_words_reference(transcriptions)
+            if common_words_success:
+                return common_words_reference
+            else:
+                # print("Both methods failed, returning longest reference anyway...")
+                return longest_reference
+
+    def fusion(self):
+        def fuse_sample_transcriptions(weights, transcriptions):
+            reference = self.get_reference_from_transcriptions(transcriptions) # Handle the case where reference is None
+            print(f"Reference: {reference}")
+            
+            reference_index = None
+            for j, (weight, transcription) in enumerate(zip(weights, transcriptions)):
+                if transcription == reference:
+                    reference_index = j
+                    print(f"Reference matches transcription at index {j} (weight: {weight:.4f})")
+                    break
+            
+            if reference_index is None:
+                print("Warning: Reference doesn't match any original transcription")
+            
+            for j, (weight, transcription) in enumerate(zip(weights, transcriptions)):
+                if j == reference_index:
+                    print(f"Index {j} (REFERENCE, weight: {weight:.4f}): {transcription}")
+                else:
+                    print(f"Index {j} (weight: {weight:.4f}): {transcription}")
+
+        if not self.input_to_fusion:
+            raise ValueError("Run EnsembleInference.align_model_records first.")
+        
+        sorted_items = sorted(self.input_to_fusion.items(), key=lambda x: x[0], reverse=True)
+        accuracies = [a for a, _ in sorted_items]
+        transcriptions_lists = [transcriptions for _, transcriptions in sorted_items]
+        weights = self.compute_weights(accuracies)
+        for i, transcriptions_group in enumerate(islice(zip(*transcriptions_lists), 33, 37), start=33):
+            print(f"Processing index {i}")
+            fuse_sample_transcriptions(weights, transcriptions_group)
+            print('--------')
+
+    @property
+    def input_to_fusion(self):
+        """
+        Get the input to fusion dictionary.
+        """
+        if not self._input_to_fusion:
+            raise ValueError("Run EnsembleInference.align_model_records first.")
+        
+        return self._input_to_fusion
+
+
+
+def compute_weights(accuracies):
+    """
+    Compute model weights based on accuracy scores.
+    
+    Args:
+        accuracies (list): List of accuracy scores for each model
+        
+    Returns:
+        np.array: Normalized weights (higher weight for higher accuracy)
+    """
+    accuracies = np.array(accuracies)
+    weights = np.maximum(accuracies, 1e-10)
+    weights = weights / weights.sum()
+    return weights
+
+def enhanced_arabic_fusion(accuracies_to_sentences: dict):
+    """
+    error_to_sentences: Dict[float, List[str]]
+        Example:
+        {
+            45.078: ["I sit down", "I go home"],
+            72.401: ["I sat down", "I went home"],
+            61.362: ["I sit down", "I return home"]
+        }
+    Returns: List[str] of fused sentences
+    """
+    # Sort errors and extract sentences
+    sorted_items = sorted(accuracies_to_sentences.items(), key=lambda x: x[0], reverse=True)
+    accuracies = [a for a, _ in sorted_items]
+    sentence_lists = [sents for _, sents in sorted_items]
+    
+    # Handle missing sentences
+    num_sentences = max(len(sents) for sents in sentence_lists)
+    for sents in sentence_lists:
+        while len(sents) < num_sentences:
+            sents.append("")  # Pad with empty sentence
+    
+    weights = compute_weights(accuracies)
+    fused_sentences = []
+
+    for i in range(num_sentences):
+        # Extract tokenized sentences
+        versions = []
+        for sent_list in sentence_lists:
+            try:
+                sent = sent_list[i].strip()
+                tokens = sent.split() if sent else []
+                versions.append(tokens)
+            except Exception as e:
+                LOGGER.error(f"Error processing sentence {i+1}, failed: {e}")
+                versions.append([])
+
+        # Select longest sentence as base
+        base = max(versions, key=len, default=[])
+        if not base:
+            fused_sentences.append("")
+            continue
+
+        # Initialize alignment and operation matrices
+        alignment_matrix = [defaultdict(float) for _ in range(len(base))]
+        operation_matrix = [defaultdict(float) for _ in range(len(base))]
+
+        for j, tokens in enumerate(versions):
+            if not tokens:
+                # Treat empty sentence as all deletions
+                for idx in range(len(base)):
+                    operation_matrix[idx]["delete"] += weights[j] * 0.5
+                    alignment_matrix[idx][""] += weights[j] * 0.5
+                continue
+
+            # Align using SequenceMatcher
+            matcher = SequenceMatcher(None, base, tokens)
+            aligned = [None] * len(base)
+
+            for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+                vote_weight = weights[j]  # Use model weight
+                if tag == 'equal':
+                    for i, j_idx in zip(range(i1, i2), range(j1, j2)):
+                        alignment_matrix[i][tokens[j_idx]] += vote_weight
+                        operation_matrix[i]["equal"] += vote_weight
+                        aligned[i] = True
+                elif tag == 'replace':
+                    for i, j_idx in zip(range(i1, i2), range(j1, j2)):
+                        pos = min(i, len(alignment_matrix) - 1)
+                        alignment_matrix[pos][tokens[j_idx]] += vote_weight
+                        operation_matrix[pos]["replace"] += vote_weight
+                        aligned[pos] = True
+                elif tag == 'insert':
+                    for offset, j_idx in enumerate(range(j1, j2)):
+                        pos = min(i1 + offset, len(alignment_matrix) - 1)
+                        alignment_matrix[pos][tokens[j_idx]] += vote_weight
+                        operation_matrix[pos]["insert"] += vote_weight
+                        aligned[pos] = True
+                elif tag == 'delete':
+                    for i in range(i1, i2):
+                        operation_matrix[i]["delete"] += vote_weight
+                        alignment_matrix[i][""] += vote_weight
+                        aligned[i] = True
+
+            # Vote for deletions for unaligned positions
+            for idx, flag in enumerate(aligned):
+                if flag is None:
+                    operation_matrix[idx]["delete"] += weights[j] * 0.5
+                    alignment_matrix[idx][""] += weights[j] * 0.5
+
+        # Fuse tokens
+        fused = []
+        for idx, (op_votes, word_votes) in enumerate(zip(operation_matrix, alignment_matrix)):
+            if op_votes:
+                best_op = max(op_votes.items(), key=lambda x: x[1])[0]
+                total_weight = sum(op_votes.values())
+                if best_op == "delete" and op_votes["delete"] > 0.6 * total_weight:
+                    continue  # Skip token if deletion strongly supported
+                elif best_op in ["equal", "replace", "insert"]:
+                    if word_votes:
+                        # Check if weights are close (within 10%)
+                        valid_words = {k: v for k, v in word_votes.items() if k != ""}
+                        if valid_words:
+                            max_weight = max(valid_words.values())
+                            close_weights = [k for k, v in valid_words.items() if v >= 0.9 * max_weight]
+                            if len(close_weights) > 1:
+                                # Fallback to majority voting
+                                word_counts = defaultdict(int)
+                                for j, tokens in enumerate(versions):
+                                    if idx < len(tokens):
+                                        word_counts[tokens[idx]] += 1
+                                best_word = max(word_counts.items(), key=lambda x: x[1])[0]
+                            else:
+                                # Use highest-weighted word
+                                best_word = max(valid_words.items(), key=lambda x: x[1])[0]
+                            fused.append(best_word)
+        fused_sentences.append(' '.join(fused))
+
+    return fused_sentences

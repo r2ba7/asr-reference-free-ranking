@@ -1,4 +1,7 @@
 import re
+from . import logger
+
+LOGGER = logger.Logger.get_logger(module_name=__name__)
 
 class ValidateText:
     """

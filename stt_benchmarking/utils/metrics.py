@@ -146,7 +146,7 @@ class FilteredS2TMetrics:
             
             char_acc = FilteredS2TMetrics.compute_cer_accuracy(ref, hyp)
             # bert_score = FilteredS2TMetrics.compute_bert_score([ref], [hyp])
-            average_score = round((word_acc + char_acc) / 3, 3)
+            average_score = round((word_acc + char_acc) / 2, 3)
             
             return {
                 "word_accuracy": round(word_acc, 3),
@@ -187,7 +187,7 @@ class FilteredS2TMetrics:
         # bert_score_avg = FilteredS2TMetrics.compute_bert_score(valid_refs, valid_hyps)
         word_avg = round(sum(word_accuracies) / len(word_accuracies), 3)
         char_avg = round(sum(char_accuracies) / len(char_accuracies), 3)
-        average_score = round((word_avg + char_avg) / 3, 3)
+        average_score = round((word_avg + char_avg) / 2, 3)
 
         return {
             "word_accuracy": word_avg,

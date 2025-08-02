@@ -771,6 +771,16 @@ class EnsembleInferenceRefactored:
         weights = weights / weights.sum()
         return weights
     
+    @staticmethod
+    def find_first_anchors(reference_sentence, compared_sentence):
+        ref_words = reference_sentence.split()
+        comp_words = compared_sentence.split()
+        for i, ref_word in enumerate(ref_words):
+            for j, comp_word in enumerate(comp_words):
+                if ref_word == comp_word:
+                    return (i, j)
+        return None
+    
     def combine_models_transcriptions(self, *models, missing_value=None):
         """
         Align samples from multiple models based on common keys.
@@ -822,115 +832,130 @@ class EnsembleInferenceRefactored:
     # Done reference
     def get_reference_from_transcriptions(self, transcriptions):
         def get_longest_reference(transcriptions):
-            def find_first_anchors(reference_sentence, compared_sentence):
-                ref_words = reference_sentence.split()
-                comp_words = compared_sentence.split()
-                for i, ref_word in enumerate(ref_words):
-                    for j, comp_word in enumerate(comp_words):
-                        if ref_word == comp_word:
-                            return (i, j)
-                return None
-            
-            valid_transcriptions = [t for t in transcriptions if t is not None]
+            valid_transcriptions = [(i, t) for i, t in enumerate(transcriptions) if t is not None]
             if not valid_transcriptions:
-                return False, None
+                return False, None, None
             
-            longest_reference = max(valid_transcriptions, key=len)
+            longest_original_index, longest_reference = max(valid_transcriptions, key=lambda x: len(x[1]))
             # print(f"Reference (longest): {longest_reference}")
-            
             successful_alignments = 0
-            longest_index = valid_transcriptions.index(longest_reference)
-            for i, transcription in enumerate(valid_transcriptions):
-                if i != longest_index:  # Compare by index, not content
+            for original_index, transcription in valid_transcriptions:
+                if original_index != longest_original_index:  # Compare by index, not content
                     # print(f"Comparing: {transcription}")
-                    anchors = find_first_anchors(longest_reference, transcription)
+                    anchors = self.find_first_anchors(longest_reference, transcription)
                     if anchors:
                         successful_alignments += 1
                         # print(f"  Anchors found at positions: {anchors}")
                     else:
-                        pass
                         # print(f"  No anchors found")
+                        pass
             
             total_comparisons = len(valid_transcriptions) - 1
             success = successful_alignments >= (total_comparisons / 2) if total_comparisons > 0 else True
             # print(f"Alignment success: {success} ({successful_alignments}/{total_comparisons})")
-            return success, longest_reference
+            return success, longest_reference, longest_original_index
                 
         def get_common_words_reference(transcriptions):
-            def count_common_words(transcription1, transcription2):
-                words1 = set(transcription1.split())
-                words2 = set(transcription2.split())
+            def count_common_words(sentence1, sentence2):
+                words1 = set(sentence1.split())
+                words2 = set(sentence2.split())
                 return len(words1.intersection(words2))
             
-            valid_transcriptions = [t for t in transcriptions if t is not None]
-            if len(valid_transcriptions) <= 1:
-                # print("Not enough valid transcriptions for common words alignment")
-                return False, None
-            
-
+            valid_transcriptions = [(i, t) for i, t in enumerate(transcriptions) if t is not None]
+            if not valid_transcriptions:
+                return False, None, None
+    
             best_total_common = -1
             best_reference = None
-            for i, transcription_i in enumerate(valid_transcriptions):
+            best_index = None
+            for original_i, transcription_i in valid_transcriptions:
                 total_common_words = 0
-                # print(f"\nAnalyzing: '{transcription_i}'")
-                for j, transcription_j in enumerate(valid_transcriptions):
-                    if i != j:  # Compare by index, not content
+                # print(f"\nAnalyzing: '{transcription_i}'")                
+                for original_j, transcription_j in valid_transcriptions:
+                    if original_i != original_j:  # Compare by index, not content
                         common_count = count_common_words(transcription_i, transcription_j)
                         total_common_words += common_count
                         # print(f"  vs '{transcription_j}': {common_count} common words")
                 
                 # print(f"  Total common words: {total_common_words}")
+                
                 if total_common_words > best_total_common:
                     best_total_common = total_common_words
                     best_reference = transcription_i
+                    best_index = original_i
             
             if best_reference and best_total_common > 0:
                 # print(f"\nSelected reference with {best_total_common} total common words")
                 # print(f"Reference: '{best_reference}'")
-                return True, best_reference
+                return True, best_reference, best_index
             
             # print("No common words found between any transcriptions")
-            return False, None
+            return False, None, None
 
+        # Always ensure we have at least one valid transcription to return
         valid_transcriptions = [t for t in transcriptions if t is not None]
         if not valid_transcriptions:
-            # print("No valid transcriptions found")
-            return None
+            return None, None, None
         
-        longest_success, longest_reference = get_longest_reference(transcriptions)
+        longest_success, longest_reference, longest_index = get_longest_reference(transcriptions)
+        
         if longest_success:
-            # print("Proceeding with longest reference...")
-            return longest_reference
+            reference_type = "longest"
+            return reference_type, longest_reference, longest_index
         else:
-            # print("Longest alignment failed, using common words fallback...")
-            common_words_success, common_words_reference = get_common_words_reference(transcriptions)
+            common_words_success, common_words_reference, common_words_index = get_common_words_reference(transcriptions)
             if common_words_success:
-                return common_words_reference
+                reference_type = "common_words"
+                return reference_type, common_words_reference, common_words_index
             else:
-                # print("Both methods failed, returning longest reference anyway...")
-                return longest_reference
+                # Return longest reference anyway with its index
+                reference_type = "longest"
+                return reference_type, longest_reference, longest_index
+
+    def align_transcription_to_reference(self, reference_type, reference, transcription):
+        """
+        Simple alignment function that extracts operations and candidate values.
+        
+        Args:
+            reference (str): Reference transcription
+            transcription (str): Candidate transcription to align
+            
+        Returns:
+            tuple: (operations, candidate_values)
+        """
+        reference_tokens = reference.split()
+        candidate_tokens = transcription.split()
+        # Initialize operations and values arrays
+        operations = ["<DELETE>"] * len(reference_tokens)
+        candidate_values = [None] * len(reference_tokens)
+        return operations, candidate_values
 
     def fusion(self):
         def fuse_sample_transcriptions(weights, transcriptions):
-            reference = self.get_reference_from_transcriptions(transcriptions) # Handle the case where reference is None
-            print(f"Reference: {reference}")
-            
-            reference_index = None
-            for j, (weight, transcription) in enumerate(zip(weights, transcriptions)):
-                if transcription == reference:
-                    reference_index = j
-                    print(f"Reference matches transcription at index {j} (weight: {weight:.4f})")
-                    break
-            
-            if reference_index is None:
-                print("Warning: Reference doesn't match any original transcription")
-            
-            for j, (weight, transcription) in enumerate(zip(weights, transcriptions)):
-                if j == reference_index:
-                    print(f"Index {j} (REFERENCE, weight: {weight:.4f}): {transcription}")
-                else:
-                    print(f"Index {j} (weight: {weight:.4f}): {transcription}")
+            reference_type, reference, reference_index = self.get_reference_from_transcriptions(transcriptions) # Handle the case where reference and index are None
+            if reference is None or reference_index is None:
+                pass
 
+            all_alignments = []
+            print(f"Reference: {reference}, index: {reference_index}")
+            for j, (weight, transcription) in enumerate(zip(weights, transcriptions)):
+                # Skip this record if transcription is None
+                if transcription is None:
+                    continue
+
+                operations, candidate_values = self.align_transcription_to_reference(reference_type=reference_type, reference=reference, transcription=transcription)
+                alignment_result = {
+                    'model_index': j,
+                    'weight': weight,
+                    'operations': operations,
+                    'candidate_values': candidate_values,
+                    'is_reference': (j == reference_index)
+                }
+                all_alignments.append(alignment_result)
+                print("Alignment result:", alignment_result)
+            
+            print(f"Total alignments collected: {len(all_alignments)}")
+            
         if not self.input_to_fusion:
             raise ValueError("Run EnsembleInference.align_model_records first.")
         
@@ -941,7 +966,7 @@ class EnsembleInferenceRefactored:
         for i, transcriptions_group in enumerate(islice(zip(*transcriptions_lists), 33, 37), start=33):
             print(f"Processing index {i}")
             fuse_sample_transcriptions(weights, transcriptions_group)
-            print('--------')
+            print('--------------------------------------------')
 
     @property
     def input_to_fusion(self):
@@ -952,7 +977,15 @@ class EnsembleInferenceRefactored:
             raise ValueError("Run EnsembleInference.align_model_records first.")
         
         return self._input_to_fusion
-
+    
+    @input_to_fusion.setter
+    def input_to_fusion(self, value):
+        """
+        Set the input to fusion dictionary.
+        """
+        if not isinstance(value, dict):
+            raise ValueError("Input to fusion must be a dictionary.")
+        self._input_to_fusion = value
 
 
 def compute_weights(accuracies):

@@ -61,7 +61,7 @@ class S2TMetrics:
         metrics = {
             "word_accuracy": S2TMetrics.word_accuracy(refs, hyps),
             "char_accuracy": S2TMetrics.character_accuracy(refs, hyps),
-            "bert_score": S2TMetrics.bert_score_similarity(refs, hyps),
+            # "bert_score": S2TMetrics.bert_score_similarity(refs, hyps),
         }
 
         # Add average of all similarity metrics
@@ -145,13 +145,13 @@ class FilteredS2TMetrics:
                 }
             
             char_acc = FilteredS2TMetrics.compute_cer_accuracy(ref, hyp)
-            bert_score = FilteredS2TMetrics.compute_bert_score([ref], [hyp])
-            average_score = round((word_acc + char_acc + bert_score) / 3, 3)
+            # bert_score = FilteredS2TMetrics.compute_bert_score([ref], [hyp])
+            average_score = round((word_acc + char_acc) / 3, 3)
             
             return {
                 "word_accuracy": round(word_acc, 3),
                 "char_accuracy": round(char_acc, 3),
-                "bert_score": bert_score,
+                # "bert_score": bert_score,
                 "average_score": average_score,
             }
         
@@ -179,20 +179,20 @@ class FilteredS2TMetrics:
             return {
                 "word_accuracy": 0.0,
                 "char_accuracy": 0.0,
-                "bert_score": 0.0,
+                # "bert_score": 0.0,
                 "average_score": 0.0,
                 "num_valid_samples": 0
             }
 
-        bert_score_avg = FilteredS2TMetrics.compute_bert_score(valid_refs, valid_hyps)
+        # bert_score_avg = FilteredS2TMetrics.compute_bert_score(valid_refs, valid_hyps)
         word_avg = round(sum(word_accuracies) / len(word_accuracies), 3)
         char_avg = round(sum(char_accuracies) / len(char_accuracies), 3)
-        average_score = round((word_avg + char_avg + bert_score_avg) / 3, 3)
+        average_score = round((word_avg + char_avg) / 3, 3)
 
         return {
             "word_accuracy": word_avg,
             "char_accuracy": char_avg,
-            "bert_score": bert_score_avg,
+            # "bert_score": bert_score_avg,
             "average_score": average_score,
             "num_valid_samples": f"{len(valid_refs)}/{len(refs)}",
             "num_excluded_samples": non_valid

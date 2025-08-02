@@ -54,9 +54,10 @@ def load_audio_transcripts(data_dir, is_egy):
 
     # Bulk normalize all transcriptions at once
     if transcriptions:
-        normalized_transcriptions = text_processing.ArabicTextProcessor.process_texts(transcriptions)
-        # Reinsert normalized transcriptions back into samples
+        processed_transcriptions = text_processing.ArabicTextProcessor.process_texts(transcriptions)
+        normalized_transcriptions = text_processing.ArabicTextProcessor.normalize_texts(transcriptions)
         for i, sample in enumerate(samples):
+            sample["processed_transcription"] = processed_transcriptions[i]
             sample["normalized_transcription"] = normalized_transcriptions[i]
 
     return samples

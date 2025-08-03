@@ -1,6 +1,7 @@
 from difflib import SequenceMatcher
 from collections import defaultdict
 from itertools import islice
+from collections import Counter
 
 import numpy as np
 from . import LOGGER
@@ -771,62 +772,6 @@ class EnsembleInferenceRefactored:
         weights = weights / weights.sum()
         return weights
     
-    @staticmethod
-    def find_first_anchors(reference_sentence, compared_sentence):
-        ref_words = reference_sentence.split()
-        comp_words = compared_sentence.split()
-        for i, ref_word in enumerate(ref_words):
-            for j, comp_word in enumerate(comp_words):
-                if ref_word == comp_word:
-                    return (i, j)
-        return None
-    
-    @staticmethod
-    def validate_anchor_quality(reference, transcription):
-        """
-        Validate that anchors represent meaningful common structure
-        
-        Returns:
-            tuple: (is_valid, anchor_info)
-        """
-        anchors = EnsembleInferenceRefactored.find_first_anchors(reference, transcription)
-        if not anchors:
-            return False, None
-            
-        ref_pos, trans_pos = anchors
-        ref_words = reference.split()
-        trans_words = transcription.split()
-        
-        # Get remaining words after the anchor
-        ref_remaining = ref_words[ref_pos:]
-        trans_remaining = trans_words[trans_pos:]
-        
-        # Count additional matching words after the anchor
-        additional_matches = 0
-        min_len = min(len(ref_remaining), len(trans_remaining))
-        
-        # Check for continuation - at least some structure should continue
-        for i in range(min_len):
-            if ref_remaining[i] == trans_remaining[i]:
-                additional_matches += 1
-            else:
-                break  # Stop at first mismatch for consecutive checking
-        
-        # For very short sequences, we need perfect continuation
-        # For longer sequences, we need at least some continuation
-        if min_len <= 2:
-            # Short sequences need exact continuation after anchor
-            is_valid = additional_matches == min_len
-        else:
-            # Longer sequences need at least 2 consecutive matches after anchor
-            is_valid = additional_matches >= 2
-            
-        return is_valid, {
-            "positions": anchors, 
-            "additional_matches": additional_matches,
-            "min_required": 2 if min_len > 2 else min_len
-        }
-    
     def combine_models_transcriptions(self, *models, missing_value=None):
         """
         Align samples from multiple models based on common keys.
@@ -875,6 +820,50 @@ class EnsembleInferenceRefactored:
             
             self._input_to_fusion[accuracy] = aligned_samples
 
+    @staticmethod
+    def find_first_anchors(reference_sentence, compared_sentence):
+        ref_words = reference_sentence.split()
+        comp_words = compared_sentence.split()
+        for i, ref_word in enumerate(ref_words):
+            for j, comp_word in enumerate(comp_words):
+                if ref_word == comp_word:
+                    return (i, j)
+        return None
+    
+    @staticmethod
+    def validate_anchor_quality(reference, transcription):
+        """
+        Validate that anchors represent meaningful common structure using SequenceMatcher
+        
+        Returns:
+            tuple: (is_valid, anchor_info)
+        """
+        anchors = EnsembleInferenceRefactored.find_first_anchors(reference, transcription)
+        if not anchors:
+            return False, None
+            
+        ref_pos, trans_pos = anchors
+        ref_words = reference.split()
+        trans_words = transcription.split()
+        ref_remaining = ref_words[ref_pos:]
+        trans_remaining = trans_words[trans_pos:]
+        # Use SequenceMatcher on the remaining sequences for better validation
+        matcher = SequenceMatcher(None, ref_remaining, trans_remaining)
+        # Get the longest matching block starting from position 0 (right after anchor)
+        longest_match = matcher.find_longest_match(0, len(ref_remaining), 0, len(trans_remaining))
+        additional_matches = longest_match.size
+        min_len = min(len(ref_remaining), len(trans_remaining))
+        if min_len <= 2:
+            is_valid = additional_matches == min_len
+        else:
+            is_valid = additional_matches >= 2
+            
+        return is_valid, {
+            "positions": anchors, 
+            "additional_matches": additional_matches,
+            "min_required": 2 if min_len > 2 else min_len
+        }
+
     # Done reference
     def get_reference_from_transcriptions(self, transcriptions):
         def get_longest_reference(transcriptions):
@@ -883,7 +872,6 @@ class EnsembleInferenceRefactored:
                 return False, None, None
             
             longest_original_index, longest_reference = max(valid_transcriptions, key=lambda x: len(x[1]))
-            # print(f"Reference (longest): {longest_reference}")
             successful_alignments = 0
             total_comparisons = len(valid_transcriptions) - 1
             for original_index, transcription in valid_transcriptions:
@@ -892,7 +880,6 @@ class EnsembleInferenceRefactored:
                     if is_valid:
                         successful_alignments += 1
             
-            # Need at least 50% of transcriptions to have good structural alignment
             success_ratio = successful_alignments / total_comparisons if total_comparisons > 0 else 1.0
             success = success_ratio >= 0.5
             return success, longest_reference, longest_original_index
@@ -906,40 +893,38 @@ class EnsembleInferenceRefactored:
             return True, longest_reference, longest_original_index
         
         def get_common_words_reference(transcriptions):
-            def count_common_words(sentence1, sentence2):
-                words1 = set(sentence1.split())
-                words2 = set(sentence2.split())
-                return len(words1.intersection(words2))
+            """
+            Reference selection using SequenceMatcher similarity ratios
+            """
+            def calculate_similarity(sentence1, sentence2):
+                """Calculate similarity ratio between two sentences using SequenceMatcher"""
+                words1 = sentence1.split()
+                words2 = sentence2.split()
+                matcher = SequenceMatcher(None, words1, words2)
+                return matcher.ratio()
             
             valid_transcriptions = [(i, t) for i, t in enumerate(transcriptions) if t is not None]
             if not valid_transcriptions:
                 return False, None, None
-    
-            best_total_common = -1
+
+            best_total_similarity = -1
             best_reference = None
             best_index = None
             for original_i, transcription_i in valid_transcriptions:
-                total_common_words = 0
-                # print(f"\nAnalyzing: '{transcription_i}'")                
+                total_similarity = 0.0
                 for original_j, transcription_j in valid_transcriptions:
-                    if original_i != original_j:  # Compare by index, not content
-                        common_count = count_common_words(transcription_i, transcription_j)
-                        total_common_words += common_count
-                        # print(f"  vs '{transcription_j}': {common_count} common words")
+                    if original_i != original_j:
+                        similarity = calculate_similarity(transcription_i, transcription_j)
+                        total_similarity += similarity
                 
-                # print(f"  Total common words: {total_common_words}")
-                
-                if total_common_words > best_total_common:
-                    best_total_common = total_common_words
+                if total_similarity > best_total_similarity:
+                    best_total_similarity = total_similarity
                     best_reference = transcription_i
                     best_index = original_i
             
-            if best_reference and best_total_common > 0:
-                # print(f"\nSelected reference with {best_total_common} total common words")
-                # print(f"Reference: '{best_reference}'")
+            if best_reference and best_total_similarity > 0:
                 return True, best_reference, best_index
             
-            # print("No common words found between any transcriptions")
             return False, None, None
 
         # Always ensure we have at least one valid transcription to return
@@ -955,10 +940,10 @@ class EnsembleInferenceRefactored:
             if common_words_success:
                 return "common_words", common_words_reference, common_words_index
             else:
-                _, longest_reference, longest_original_index = get_longest_reference_fallback
+                _, longest_reference, longest_original_index = get_longest_reference_fallback(transcriptions)
                 return "longest_fallback", longest_reference, longest_original_index
 
-    def align_transcription_to_reference(self, reference_type, reference, transcription):
+    def align_transcriptions_to_reference(self, reference, reference_type, reference_index, transcriptions):
         """
         Simple alignment function that extracts operations and candidate values.
         
@@ -969,57 +954,133 @@ class EnsembleInferenceRefactored:
         Returns:
             tuple: (operations, candidate_values)
         """
-        def align_with_longest_strategy(reference, transcription):          
-            if not reference or not transcription:
-                return (["<DELETE>"] * len(reference.split()), [None] * len(reference.split()))
-            
+        # Wont change
+        def align_with_longest_strategy(reference, transcriptions, reference_index=reference_index, reference_type=reference_type):
+            alignment_results = []
             ref_words = reference.split()
-            trans_words = transcription.split()
-            operations = ["<DELETE>"] * len(ref_words)
-            candidate_values = [None] * len(ref_words)
-            matcher = SequenceMatcher(None, ref_words, trans_words)
-            for op, ref_start, ref_end, trans_start, trans_end in matcher.get_opcodes():
-                if op == 'equal':
-                    for i in range(ref_start, ref_end):
-                        operations[i] = "<KEEP>"
-                        candidate_values[i] = ref_words[i]  # Same as trans_words[trans_start + (i - ref_start)]
+            for model_index, transcription in enumerate(transcriptions):
+                alignment_result = {
+                    'model_index': model_index,
+                    'reference_type': reference_type,
+                    'is_reference': (model_index == reference_index)
+                }
+                if not transcription:
+                    alignment_result['operations'] = ["<DELETE>"] * len(ref_words)
+                    alignment_result['tokens'] = [None] * len(ref_words)
+                else:
+                    trans_words = transcription.split()
+                    operations = ["<DELETE>"] * len(ref_words)
+                    candidate_values = [None] * len(ref_words)
+                    matcher = SequenceMatcher(None, ref_words, trans_words)
+                    for op, ref_start, ref_end, trans_start, trans_end in matcher.get_opcodes():
+                        if op == 'equal':
+                            for i in range(ref_start, ref_end):
+                                operations[i] = "<KEEP>"
+                                candidate_values[i] = ref_words[i]  # Same as trans_words[trans_start + (i - ref_start)]
+                                
+                        elif op == 'replace':
+                            for i in range(ref_start, ref_end):
+                                operations[i] = "<REPLACE>"
+                                trans_idx = trans_start + (i - ref_start)
+                                if trans_idx < trans_end:
+                                    candidate_values[i] = trans_words[trans_idx]
+                                else:
+                                    candidate_values[i] = None
+                                    
+                        elif op == 'delete':
+                            for i in range(ref_start, ref_end):
+                                operations[i] = "<DELETE>"
+                                candidate_values[i] = None
+                                
+                        elif op == 'insert':
+                            # Words exist in transcription but not in reference
+                            # These don't affect our reference-based operations array
+                            # but could be logged for debugging
+                            pass
+                    alignment_result['operations'] = operations
+                    alignment_result['tokens'] = candidate_values
+                alignment_results.append(alignment_result)
+            return alignment_results        
+
+        # Maybe needs small tweaking
+        def align_with_common_words_strategy(reference, transcriptions, reference_index=reference_index, reference_type=reference_type):
+            alignment_results = []
+            valid_transcriptions = [(i, t) for i, t in enumerate(transcriptions) if t is not None]
+            ref_words = reference.split()
+            max_length = max(len(t.split()) for _, t in valid_transcriptions)
+            longest_idx, longest_trans = max(valid_transcriptions, key=lambda x: len(x[1].split()))
+            longest_words = longest_trans.split()
+            padded_ref_words = ref_words.copy()
+            for model_index, transcription in enumerate(transcriptions):
+                matcher = SequenceMatcher(None, longest_words, padded_ref_words)
+                insert_positions = []
+                for op, long_start, long_end, ref_start, ref_end in matcher.get_opcodes():
+                    if op == 'delete':
+                        for i in range(long_start, long_end):
+                            insert_positions.append((ref_start, longest_words[i]))
+                for pos, _ in sorted(insert_positions, key=lambda x: x[0]):
+                    padded_ref_words.insert(pos, None)
+                padded_ref_words = padded_ref_words[:max_length] if len(padded_ref_words) > max_length else padded_ref_words + [None] * (max_length - len(padded_ref_words))
+                padded_ref_length = len(padded_ref_words)
+            # Step 2: Align all transcriptions to padded reference
+            inserted_words = {}
+            for model_index, transcription in enumerate(transcriptions):
+                print(transcription)
+                alignment_result = {
+                    'model_index': model_index,
+                    'reference_type': reference_type,
+                    'is_reference': (model_index == reference_index)
+                }
+                if not transcription:
+                    alignment_result['operations'] = ["<DELETE>"] * padded_ref_length
+                    alignment_result['tokens'] = [None] * padded_ref_length
+                else:
+                    trans_words = transcription.split()
+                    operations = ["<DELETE>"] * padded_ref_length
+                    tokens = [None] * padded_ref_length
+                    matcher = SequenceMatcher(None, padded_ref_words, trans_words)
+                    inserted_words[model_index] = []
+                    for op, ref_start, ref_end, trans_start, trans_end in matcher.get_opcodes():
+                        ref_text = padded_ref_words[ref_start:ref_end]
+                        trans_text = trans_words[trans_start:trans_end]
                         
-                elif op == 'replace':
-                    for i in range(ref_start, ref_end):
-                        operations[i] = "<REPLACE>"
-                        trans_idx = trans_start + (i - ref_start)
-                        if trans_idx < trans_end:
-                            candidate_values[i] = trans_words[trans_idx]
-                        else:
-                            candidate_values[i] = None
-                            
-                elif op == 'delete':
-                    for i in range(ref_start, ref_end):
-                        operations[i] = "<DELETE>"
-                        candidate_values[i] = None
-                        
-                elif op == 'insert':
-                    # Words exist in transcription but not in reference
-                    # These don't affect our reference-based operations array
-                    # but could be logged for debugging
-                    pass
-            
-            return operations, candidate_values            
-
-        def align_with_common_words_strategy(reference, transcription):
+                        print(f"{op.upper():<9} | "
+                            f"ref[{ref_start}:{ref_end}] = '{ref_text}' | "
+                            f"trans[{trans_start}:{trans_end}] = '{trans_text}'")
+                        if op == 'equal':
+                            for i in range(ref_start, ref_end):
+                                operations[i] = "<KEEP>"
+                                tokens[i] = trans_words[trans_start + (i - ref_start)]
+                        elif op == 'replace':
+                            for i in range(ref_start, ref_end):
+                                operations[i] = "<REPLACE>"
+                                trans_idx = trans_start + (i - ref_start)
+                                if trans_idx < trans_end:
+                                    tokens[i] = trans_words[trans_idx]
+                                else:
+                                    tokens[i] = None
+                        elif op == 'delete':
+                            for i in range(ref_start, ref_end):
+                                operations[i] = "<DELETE>"
+                                tokens[i] = None
+                        elif op == 'insert':
+                            inserted_words[model_index].extend(trans_words[trans_start:trans_end])
+                    alignment_result['operations'] = operations
+                    alignment_result['tokens'] = tokens
+                    print("--------------")
+                alignment_results.append(alignment_result)
+            return alignment_results
+        
+        def align_with_longest_fallback_strategy(reference, transcriptions, reference_index=reference_index, reference_type=reference_type):
             pass
-
-        def align_with_longest_fallback_strategy(reference, transcription):
-            pass
-
+        
         if reference_type == "longest":
-            operations, candidate_values = align_with_longest_strategy(reference, transcription)
+            alignment_results = align_with_longest_strategy(reference=reference, transcriptions=transcriptions, reference_index=reference_index, reference_type=reference_type)
         elif reference_type == "common_words":
-            operations, candidate_values = align_with_common_words_strategy(reference, transcription)
+            alignment_results = align_with_common_words_strategy(reference=reference, transcriptions=transcriptions, reference_index=reference_index, reference_type=reference_type)
         else:
-            operations, candidate_values = align_with_longest_fallback_strategy(reference, transcription)
-
-        return operations, candidate_values
+            alignment_results = align_with_longest_fallback_strategy(reference=reference, transcriptions=transcriptions, reference_index=reference_index, reference_type=reference_type)
+        return alignment_results
 
     def voting_scheme(self):
         pass
@@ -1029,26 +1090,26 @@ class EnsembleInferenceRefactored:
             reference_type, reference, reference_index = self.get_reference_from_transcriptions(transcriptions) # Handle the case where reference and index are None
             if reference is None or reference_index is None:
                 pass
-            
-            all_alignments = []
-            print(f"Reference: {reference}, index: {reference_index}")
-            for j, (weight, transcription) in enumerate(zip(weights, transcriptions)):
-                # Skip this record if transcription is None
-                if transcription is None:
-                    continue
+            print(f"Reference: {reference}, type: {reference_type}, index: {reference_index}")
 
-                operations, candidate_values = self.align_transcription_to_reference(reference_type=reference_type, reference=reference, transcription=transcription)
-                alignment_result = {
-                    'model_index': j,
-                    'weight': weight,
-                    'operations': operations,
-                    'candidate_values': candidate_values,
-                    'is_reference': (j == reference_index),
-                    'reference_type': reference_type,
-                }
-                all_alignments.append(alignment_result)
-                print(alignment_result)
-            print(f"Total alignments collected: {len(all_alignments)}")
+            alignment_results = self.align_transcriptions_to_reference(reference=reference, reference_type=reference_type, reference_index=reference_index, transcriptions=transcriptions)
+            # for j, (weight, transcription) in enumerate(zip(weights, transcriptions)):
+            #     # Skip this record if transcription is None
+            #     if transcription is None:
+            #         continue
+
+            #     operations, candidate_values = self.align_transcription_to_reference(reference_type=reference_type, reference=reference, transcription=transcription)
+            #     alignment_result = {
+            #         'model_index': j,
+            #         'weight': weight,
+            #         'operations': operations,
+            #         'candidate_values': candidate_values,
+            #         'is_reference': (j == reference_index),
+            #         'reference_type': reference_type,
+            #     }
+            #     all_alignments.append(alignment_result)
+            print(alignment_results)
+            # print(f"Total alignments collected: {len(alignment_results)}")
         
         print("In EnsembleInference.fusion")
         if not self.input_to_fusion:
@@ -1058,11 +1119,12 @@ class EnsembleInferenceRefactored:
         accuracies = [a for a, _ in sorted_items]
         transcriptions_lists = [transcriptions for _, transcriptions in sorted_items]
         weights = self.compute_weights(accuracies)
-        for i, transcriptions_group in enumerate(islice(zip(*transcriptions_lists), 0, 37)):
+        for i, transcriptions_group in enumerate(zip(*transcriptions_lists)):
             print(f"Processing index {i}")
+            print(transcriptions_group)
             fuse_sample_transcriptions(weights, transcriptions_group)
-            break
             print('--------------------------------------------')
+            
 
     @property
     def input_to_fusion(self):

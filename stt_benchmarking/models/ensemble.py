@@ -1010,32 +1010,62 @@ class EnsembleInferenceRefactored:
             max_length = max(len(t.split()) for _, t in valid_transcriptions)
             longest_idx, longest_trans = max(valid_transcriptions, key=lambda x: len(x[1].split()))
             longest_words = longest_trans.split()
+
+            padded_transcriptions_words = {}
             padded_ref_words = ref_words.copy()
             for model_index, transcription in enumerate(transcriptions):
-                matcher = SequenceMatcher(None, longest_words, padded_ref_words)
-                insert_positions = []
-                for op, long_start, long_end, ref_start, ref_end in matcher.get_opcodes():
-                    if op == 'delete':
-                        for i in range(long_start, long_end):
-                            insert_positions.append((ref_start, longest_words[i]))
-                for pos, _ in sorted(insert_positions, key=lambda x: x[0]):
-                    padded_ref_words.insert(pos, None)
-                padded_ref_words = padded_ref_words[:max_length] if len(padded_ref_words) > max_length else padded_ref_words + [None] * (max_length - len(padded_ref_words))
-                padded_ref_length = len(padded_ref_words)
+                if model_index == longest_idx:
+                    padded_transcriptions_words[model_index] = longest_words
+                    continue
+
+                if model_index == reference_index:
+                    matcher = SequenceMatcher(None, longest_words, padded_ref_words)
+                    insert_positions = []
+                    for op, long_start, long_end, ref_start, ref_end in matcher.get_opcodes():
+                        if op == 'delete':
+                            for i in range(long_start, long_end):
+                                insert_positions.append((ref_start, longest_words[i]))
+                    for pos, _ in sorted(insert_positions, key=lambda x: x[0]):
+                        padded_ref_words.insert(pos, None)
+                    padded_ref_words = padded_ref_words[:max_length] if len(padded_ref_words) > max_length else padded_ref_words + [None] * (max_length - len(padded_ref_words))
+                    padded_transcriptions_words[model_index] = padded_ref_words
+                else:
+                    if transcription is None:
+                        continue
+                    else:
+                        transcription_words = transcription.split()
+                        matcher = SequenceMatcher(None, longest_words, transcription_words)
+                        insert_positions = []
+                        for op, long_start, long_end, ref_start, ref_end in matcher.get_opcodes():
+                            if op == 'delete':
+                                for i in range(long_start, long_end):
+                                    insert_positions.append((ref_start, longest_words[i]))
+                        for pos, _ in sorted(insert_positions, key=lambda x: x[0]):
+                            transcription_words.insert(pos, None)
+                        transcription_words = transcription_words[:max_length] if len(transcription_words) > max_length else transcription_words + [None] * (max_length - len(transcription_words))
+                        # Save padded transcription words
+                        padded_transcriptions_words[model_index] = transcription_words
+                        # transcriptions[model_index] = ' '.join([w for w in transcription_words if w is not None])
+
+            padded_ref_length = len(padded_ref_words)
+
             # Step 2: Align all transcriptions to padded reference
             inserted_words = {}
             for model_index, transcription in enumerate(transcriptions):
-                print(transcription)
                 alignment_result = {
                     'model_index': model_index,
                     'reference_type': reference_type,
                     'is_reference': (model_index == reference_index)
                 }
-                if not transcription:
+                if model_index in padded_transcriptions_words:
+                    trans_words = padded_transcriptions_words[model_index]
+                else:
+                    trans_words = []
+
+                if not trans_words:
                     alignment_result['operations'] = ["<DELETE>"] * padded_ref_length
                     alignment_result['tokens'] = [None] * padded_ref_length
                 else:
-                    trans_words = transcription.split()
                     operations = ["<DELETE>"] * padded_ref_length
                     tokens = [None] * padded_ref_length
                     matcher = SequenceMatcher(None, padded_ref_words, trans_words)
@@ -1043,7 +1073,7 @@ class EnsembleInferenceRefactored:
                     for op, ref_start, ref_end, trans_start, trans_end in matcher.get_opcodes():
                         ref_text = padded_ref_words[ref_start:ref_end]
                         trans_text = trans_words[trans_start:trans_end]
-                        
+
                         print(f"{op.upper():<9} | "
                             f"ref[{ref_start}:{ref_end}] = '{ref_text}' | "
                             f"trans[{trans_start}:{trans_end}] = '{trans_text}'")
@@ -1069,6 +1099,7 @@ class EnsembleInferenceRefactored:
                     alignment_result['tokens'] = tokens
                     print("--------------")
                 alignment_results.append(alignment_result)
+
             return alignment_results
         
         def align_with_longest_fallback_strategy(reference, transcriptions, reference_index=reference_index, reference_type=reference_type):

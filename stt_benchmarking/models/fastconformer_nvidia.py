@@ -1,5 +1,6 @@
 import nemo.collections.asr as nemo_asr
 from tqdm import tqdm
+import gc
 
 from . import LOGGER
 from stt_benchmarking.utils import (
@@ -20,7 +21,7 @@ class Fastconformer_hybridInference:
         self.model = self._load_model()
         self._overall_metrics = None
         self._samples_info = {}
-    
+
     def _load_model(self):
         """
         Load the HuBERT Arabic model and processor.
@@ -105,6 +106,25 @@ class Fastconformer_hybridInference:
         LOGGER.info("Overall Evaluation Summary:")
         for k, v in self._overall_metrics.items():
             LOGGER.info(f"{k}: {v}")
+
+    def reset(self):
+        """
+        Reset the inference results and metrics without reinitializing the model.
+        This clears all stored results from previous inference runs while keeping
+        the loaded model intact.
+        """
+        self._overall_metrics = None
+        self._samples_info = {}
+        
+        # Optional: Clear GPU cache if CUDA is available
+        import torch
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+            torch.cuda.reset_peak_memory_stats()
+    
+        LOGGER.info("Fastconformer_hybridInference instance has been reset. Model remains loaded.")
 
     @property
     def samples_info(self):

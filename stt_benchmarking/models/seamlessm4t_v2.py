@@ -1,3 +1,5 @@
+import gc
+
 import torch
 from transformers import AutoProcessor, SeamlessM4Tv2Model
 from tqdm import tqdm
@@ -33,7 +35,6 @@ class SeamlessM4TInference:
         self.model, self.processor = self._load_model()
         self.dtype = self.model.dtype
         self._overall_metrics = None
-        self._old_metrics = None
         self._samples_info = {}
 
     def _load_model(self):
@@ -138,7 +139,20 @@ class SeamlessM4TInference:
         LOGGER.info("Overall Evaluation Summary:")
         for k, v in self._overall_metrics.items():
             LOGGER.info(f"{k}: {v}")
+
+    def reset(self):
+        self._overall_metrics = None
+        self._samples_info = {}
         
+        # Optional: Clear GPU cache if using CUDA
+        gc.collect()
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+            torch.cuda.reset_peak_memory_stats()
+        
+        LOGGER.info("SeamlessM4t instance has been reset. Model and processor remain loaded.")
+
     @property
     def overall_metrics(self):
         return self._overall_metrics

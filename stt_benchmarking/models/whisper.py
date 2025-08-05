@@ -1,6 +1,7 @@
 import torch
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 from tqdm import tqdm
+import gc
 
 from . import LOGGER
 from stt_benchmarking.utils import (
@@ -32,8 +33,8 @@ class WhisperInference:
         
         self.model, self.processor = self._load_model()
         self.dtype = self.model.dtype
-        self._overall_metrics = None
         self._samples_info = {}
+        self._overall_metrics = None
 
     def _load_model(self):
         """
@@ -142,6 +143,18 @@ class WhisperInference:
         for k, v in self._overall_metrics.items():
             LOGGER.info(f"{k}: {v}")
     
+    def reset(self):
+        self._overall_metrics = None
+        self._samples_info = {}
+        
+        gc.collect()
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+            torch.cuda.reset_peak_memory_stats()
+        
+        LOGGER.info("WhisperInference instance has been reset. Model and processor remain loaded.")
+
     @property
     def overall_metrics(self):
         return self._overall_metrics

@@ -58,23 +58,15 @@ def sample_records_by_duration_buckets(records, bucket_size=10, no_samples=50, s
 
     return final_samples
 
-def pick_random_records(records, no_samples):
-    if no_samples > len(records):
-        raise ValueError("Requested more samples than available in the records.")
-    
-    return random.sample(records, no_samples)
+def pick_random_records(records, no_samples, seed=None, with_replacement=False):
+    if seed is not None:
+        random.seed(seed)
 
-
-def cleanup_memory(model=None, processor=None):
-    if model is not None:
-        del model
-    if processor is not None:
-        del processor
-
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
-        torch.cuda.reset_peak_memory_stats()
+    if with_replacement:
+        return [random.choice(records) for _ in range(no_samples)]
+    else:
+        if no_samples > len(records):
+            raise ValueError("Requested more samples than available in the records.")
+        return random.sample(records, no_samples)
 
 

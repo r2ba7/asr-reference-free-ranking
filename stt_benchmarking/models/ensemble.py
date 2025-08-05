@@ -4,6 +4,9 @@ from itertools import islice
 from collections import Counter
 
 import numpy as np
+
+from stt_benchmarking.utils.text_processing import ArabicTextProcessor
+from stt_benchmarking.utils import metrics
 from . import LOGGER
 
 class EnsembleInference:
@@ -755,6 +758,8 @@ class EnsembleInferenceOld:
 class EnsembleInferenceRefactored:
     def __init__(self):
         self._input_to_fusion = {}
+        self._fusion_results = []
+        self._overall_metrics = None
     
     @staticmethod
     def compute_weights(accuracies):
@@ -943,7 +948,7 @@ class EnsembleInferenceRefactored:
                 _, longest_reference, longest_original_index = get_longest_reference_fallback(transcriptions)
                 return "longest_fallback", longest_reference, longest_original_index
 
-    def align_transcriptions_to_reference(self, reference, reference_type, reference_index, transcriptions):
+    def align_transcriptions_to_reference(self, weights, reference, reference_type, reference_index, transcriptions):
         """
         Simple alignment function that extracts operations and candidate values.
         
@@ -955,11 +960,12 @@ class EnsembleInferenceRefactored:
             tuple: (operations, candidate_values)
         """
         # Wont change
-        def align_with_longest_strategy(reference, transcriptions, reference_index=reference_index, reference_type=reference_type):
+        def align_with_longest_strategy(weights, reference, transcriptions, reference_index=reference_index, reference_type=reference_type):
             alignment_results = []
             ref_words = reference.split()
-            for model_index, transcription in enumerate(transcriptions):
+            for model_index, transcription in enumerate( transcriptions):
                 alignment_result = {
+                    'model_weight': weights[model_index],
                     'model_index': model_index,
                     'reference_type': reference_type,
                     'is_reference': (model_index == reference_index)
@@ -1003,14 +1009,13 @@ class EnsembleInferenceRefactored:
             return alignment_results        
 
         # Maybe needs small tweaking
-        def align_with_common_words_strategy(reference, transcriptions, reference_index=reference_index, reference_type=reference_type):
+        def align_with_common_words_strategy(weights, reference, transcriptions, reference_index=reference_index, reference_type=reference_type):
             alignment_results = []
             valid_transcriptions = [(i, t) for i, t in enumerate(transcriptions) if t is not None]
             ref_words = reference.split()
             max_length = max(len(t.split()) for _, t in valid_transcriptions)
             longest_idx, longest_trans = max(valid_transcriptions, key=lambda x: len(x[1].split()))
             longest_words = longest_trans.split()
-
             padded_transcriptions_words = {}
             padded_ref_words = ref_words.copy()
             for model_index, transcription in enumerate(transcriptions):
@@ -1053,6 +1058,7 @@ class EnsembleInferenceRefactored:
             inserted_words = {}
             for model_index, transcription in enumerate(transcriptions):
                 alignment_result = {
+                    'model_weight': weights[model_index],
                     'model_index': model_index,
                     'reference_type': reference_type,
                     'is_reference': (model_index == reference_index)
@@ -1071,12 +1077,12 @@ class EnsembleInferenceRefactored:
                     matcher = SequenceMatcher(None, padded_ref_words, trans_words)
                     inserted_words[model_index] = []
                     for op, ref_start, ref_end, trans_start, trans_end in matcher.get_opcodes():
-                        ref_text = padded_ref_words[ref_start:ref_end]
-                        trans_text = trans_words[trans_start:trans_end]
+                        # ref_text = padded_ref_words[ref_start:ref_end]
+                        # trans_text = trans_words[trans_start:trans_end]
 
-                        print(f"{op.upper():<9} | "
-                            f"ref[{ref_start}:{ref_end}] = '{ref_text}' | "
-                            f"trans[{trans_start}:{trans_end}] = '{trans_text}'")
+                        # print(f"{op.upper():<9} | "
+                        #     f"ref[{ref_start}:{ref_end}] = '{ref_text}' | "
+                        #     f"trans[{trans_start}:{trans_end}] = '{trans_text}'")
                         if op == 'equal':
                             for i in range(ref_start, ref_end):
                                 operations[i] = "<KEEP>"
@@ -1097,65 +1103,258 @@ class EnsembleInferenceRefactored:
                             inserted_words[model_index].extend(trans_words[trans_start:trans_end])
                     alignment_result['operations'] = operations
                     alignment_result['tokens'] = tokens
-                    print("--------------")
+                    # print("--------------")
                 alignment_results.append(alignment_result)
 
             return alignment_results
         
-        def align_with_longest_fallback_strategy(reference, transcriptions, reference_index=reference_index, reference_type=reference_type):
+        def align_with_longest_fallback_strategy(weights, reference, transcriptions, reference_index=reference_index, reference_type=reference_type):
             pass
         
+        if reference is None or not transcriptions:
+            return []
         if reference_type == "longest":
-            alignment_results = align_with_longest_strategy(reference=reference, transcriptions=transcriptions, reference_index=reference_index, reference_type=reference_type)
+            alignment_results = align_with_longest_strategy(weights=weights, reference=reference, transcriptions=transcriptions, reference_index=reference_index, reference_type=reference_type)
         elif reference_type == "common_words":
-            alignment_results = align_with_common_words_strategy(reference=reference, transcriptions=transcriptions, reference_index=reference_index, reference_type=reference_type)
-        else:
-            alignment_results = align_with_longest_fallback_strategy(reference=reference, transcriptions=transcriptions, reference_index=reference_index, reference_type=reference_type)
+            alignment_results = align_with_common_words_strategy(weights=weights, reference=reference, transcriptions=transcriptions, reference_index=reference_index, reference_type=reference_type)
+        else: # Handle it later
+            alignment_results = align_with_longest_strategy(weights=weights, reference=reference, transcriptions=transcriptions, reference_index=reference_index, reference_type=reference_type)
         return alignment_results
 
-    def voting_scheme(self):
-        pass
+    def voting_scheme(self, alignment_results):
+        """
+        Implement majority voting scheme for operations and weighted voting for tokens.
+        
+        Args:
+            alignment_results: List of dictionaries containing alignment data for each model
+            
+        Returns:
+            dict: Final voting result with operations, tokens, and metadata
+        """
+        
+        def collect_position_votes(alignment_results, position):
+            """Collect all votes for a specific position"""
+            position_votes = {
+                'operations': [],
+                'tokens': [],
+                'weights': [],
+                'model_indices': [],
+                'is_reference_flags': []
+            }
+            
+            for result in alignment_results:
+                position_votes['operations'].append(result['operations'][position])
+                position_votes['tokens'].append(result['tokens'][position])
+                position_votes['weights'].append(result['model_weight'])
+                position_votes['model_indices'].append(result['model_index'])
+                position_votes['is_reference_flags'].append(result['is_reference'])
+            
+            return position_votes
+        
+        def vote_for_operation(position_votes):
+            """Determine majority operation with tie-breaking"""
+            operation_counts = Counter(position_votes['operations'])
+            majority_operation = operation_counts.most_common(1)[0][0]
+            
+            # Handle ties with priority order
+            max_count = operation_counts.most_common(1)[0][1]
+            tied_operations = [op for op, count in operation_counts.items() if count == max_count]
+            if len(tied_operations) > 1:
+                priority_order = ["<KEEP>", "<REPLACE>", "<INSERT>", "<SKIP>", "<DELETE>"]
+                for preferred_op in priority_order:
+                    if preferred_op in tied_operations:
+                        majority_operation = preferred_op
+                        break
+            
+            return majority_operation, operation_counts
+        
+        def vote_for_token(position_votes, majority_operation):
+            """Determine final token based on operation and weights"""
+            final_token = None
+            
+            if majority_operation == "<KEEP>":
+                # Find reference token or use first available
+                for i, is_ref in enumerate(position_votes['is_reference_flags']):
+                    if is_ref and position_votes['operations'][i] in ["<KEEP>", "<REPLACE>"]:
+                        final_token = position_votes['tokens'][i]
+                        break
+                
+                if final_token is None:
+                    final_token = position_votes['tokens'][0]
+                    
+            elif majority_operation in ["<REPLACE>", "<INSERT>"]:
+                # Weighted voting among models that chose this operation
+                operation_tokens = {}
+                
+                for i, op in enumerate(position_votes['operations']):
+                    if op == majority_operation and position_votes['tokens'][i] is not None:
+                        token = position_votes['tokens'][i]
+                        weight = position_votes['weights'][i]
+                        operation_tokens[token] = operation_tokens.get(token, 0) + weight
+                
+                if operation_tokens:
+                    final_token = max(operation_tokens.items(), key=lambda x: x[1])[0]
+                    
+            elif majority_operation in ["<DELETE>", "<SKIP>"]:
+                final_token = None
+            
+            return final_token
+        
+        def create_voting_detail(position, operation_counts, majority_operation, final_token, position_votes):
+            """Create detailed voting information for a position"""
+            token_weights = {}
+            
+            if majority_operation in ["<REPLACE>", "<INSERT>"]:
+                for token in set(position_votes['tokens']):
+                    if token is not None:
+                        token_weights[token] = sum(
+                            position_votes['weights'][i] 
+                            for i, t in enumerate(position_votes['tokens']) 
+                            if t == token and position_votes['operations'][i] == majority_operation
+                        )
+            
+            return {
+                'position': position,
+                'operation_votes': dict(operation_counts),
+                'majority_operation': majority_operation,
+                'final_token': final_token,
+                'models_voted': len(position_votes['operations']),
+                'token_weights': token_weights
+            }
+        
+        def construct_final_transcription(final_operations, final_tokens):
+            """Build the final transcription from operations and tokens"""
+            final_transcription_words = []
+            
+            for operation, token in zip(final_operations, final_tokens):
+                if operation in ["<KEEP>", "<REPLACE>", "<INSERT>"] and token is not None:
+                    final_transcription_words.append(token)
+            
+            return " ".join(final_transcription_words)
+        
+        def calculate_confidence_score(alignment_results, operations_length):
+            """Calculate overall confidence based on operation agreement"""
+            total_positions = operations_length
+            operation_confidence = sum(
+                max(Counter([result['operations'][i] for result in alignment_results]).values()) / len(alignment_results)
+                for i in range(total_positions)
+            ) / total_positions if total_positions > 0 else 0
+            
+            return operation_confidence
+        
+        def create_metadata(alignment_results, final_operations):
+            """Create metadata about the voting results"""
+            return {
+                'reference_type': alignment_results[0].get('reference_type', 'unknown'),
+                'total_keep': final_operations.count('<KEEP>'),
+                'total_replace': final_operations.count('<REPLACE>'),
+                'total_insert': final_operations.count('<INSERT>'),
+                'total_delete': final_operations.count('<DELETE>'),
+                'total_skip': final_operations.count('<SKIP>')
+            }
+        
+        if not alignment_results or len(alignment_results) == 0:
+            voting_result = {
+                'final_transcription': '',
+                'final_operations': [],
+                'final_tokens': [],
+                'voting_details': {},
+                'confidence_score': 0,
+                'total_models': 0,
+                'operations_length': 0,
+                'metadata': {}
+            }
+            return voting_result
+        
+        # Main voting logic
+        operations_length = len(alignment_results[0]['operations'])
+        final_operations = []
+        final_tokens = []
+        voting_details = []
+        
+        # Process each position
+        for position in range(operations_length):
+            position_votes = collect_position_votes(alignment_results, position)
+            majority_operation, operation_counts = vote_for_operation(position_votes)
+            final_token = vote_for_token(position_votes, majority_operation)
+            
+            final_operations.append(majority_operation)
+            final_tokens.append(final_token)
+            
+            voting_detail = create_voting_detail(position, operation_counts, majority_operation, final_token, position_votes)
+            voting_details.append(voting_detail)
+        
+        # Construct final results
+        final_transcription = construct_final_transcription(final_operations, final_tokens)
+        confidence_score = calculate_confidence_score(alignment_results, operations_length)
+        metadata = create_metadata(alignment_results, final_operations)
+        
+        voting_result = {
+            'final_transcription': final_transcription,
+            'final_operations': final_operations,
+            'final_tokens': final_tokens,
+            'voting_details': voting_details,
+            'confidence_score': confidence_score,
+            'total_models': len(alignment_results),
+            'operations_length': operations_length,
+            'metadata': metadata
+        }
+        
+        return voting_result
 
     def fusion(self):
         def fuse_sample_transcriptions(weights, transcriptions):
             reference_type, reference, reference_index = self.get_reference_from_transcriptions(transcriptions) # Handle the case where reference and index are None
-            if reference is None or reference_index is None:
-                pass
-            print(f"Reference: {reference}, type: {reference_type}, index: {reference_index}")
+            # print(f"Reference: {reference}, type: {reference_type}, index: {reference_index}")
 
-            alignment_results = self.align_transcriptions_to_reference(reference=reference, reference_type=reference_type, reference_index=reference_index, transcriptions=transcriptions)
-            # for j, (weight, transcription) in enumerate(zip(weights, transcriptions)):
-            #     # Skip this record if transcription is None
-            #     if transcription is None:
-            #         continue
+            alignment_results = self.align_transcriptions_to_reference(weights=weights, reference=reference, reference_type=reference_type, reference_index=reference_index, transcriptions=transcriptions)
+            # print(alignment_results)
+            voting_result = self.voting_scheme(alignment_results)
+            # print(f"Voting result: {voting_result}")
+            return voting_result
 
-            #     operations, candidate_values = self.align_transcription_to_reference(reference_type=reference_type, reference=reference, transcription=transcription)
-            #     alignment_result = {
-            #         'model_index': j,
-            #         'weight': weight,
-            #         'operations': operations,
-            #         'candidate_values': candidate_values,
-            #         'is_reference': (j == reference_index),
-            #         'reference_type': reference_type,
-            #     }
-            #     all_alignments.append(alignment_result)
-            print(alignment_results)
-            # print(f"Total alignments collected: {len(alignment_results)}")
-        
-        print("In EnsembleInference.fusion")
         if not self.input_to_fusion:
             raise ValueError("Run EnsembleInference.align_model_records first.")
-        
+         
         sorted_items = sorted(self.input_to_fusion.items(), key=lambda x: x[0], reverse=True)
         accuracies = [a for a, _ in sorted_items]
         transcriptions_lists = [transcriptions for _, transcriptions in sorted_items]
         weights = self.compute_weights(accuracies)
-        for i, transcriptions_group in enumerate(zip(*transcriptions_lists)):
-            print(f"Processing index {i}")
-            print(transcriptions_group)
-            fuse_sample_transcriptions(weights, transcriptions_group)
-            print('--------------------------------------------')
-            
+        for _, transcriptions_group in enumerate(zip(*transcriptions_lists)):
+            # print(f"Processing index {i}")
+            # print(transcriptions_group)
+            voting_result = fuse_sample_transcriptions(weights, transcriptions_group)
+            self._fusion_results.append(voting_result)
+
+            # print('--------------------------------------------')
+    
+    def _process_fusion_results(self):
+        final_transcripts = [result['final_transcription'] for result in self._fusion_results]
+        processed_results = ArabicTextProcessor.process_texts(final_transcripts)
+        return processed_results
+    
+    def evaluate(self, processed_transcriptions):
+        processed_results = self._process_fusion_results()
+        self._overall_metrics = metrics.FilteredS2TMetrics.evaluate(refs=processed_transcriptions, hyps=processed_results)
+
+    def summary_of_evaluation(self):
+        if not hasattr(self, 'overall_metrics') or not self._overall_metrics:
+            LOGGER.warning("No evaluation metrics available. Run EnsembleInferenceRefactored.evaluate first.")
+            return
+        
+        LOGGER.info("Overall Evaluation Summary:")
+        for k, v in self._overall_metrics.items():
+            LOGGER.info(f"{k}: {v}")
+
+    def reset(self):
+        """
+        Reset the EnsembleInferenceRefactored instance.
+        Clears input_to_fusion and fusion_results, but keeps the model loaded.
+        """
+        self._input_to_fusion = {}
+        self._fusion_results = []
+        self._overall_metrics = None
+        LOGGER.info("Ensemble instance has been reset.")
 
     @property
     def input_to_fusion(self):
@@ -1176,138 +1375,16 @@ class EnsembleInferenceRefactored:
             raise ValueError("Input to fusion must be a dictionary.")
         self._input_to_fusion = value
 
-
-def compute_weights(accuracies):
-    """
-    Compute model weights based on accuracy scores.
-    
-    Args:
-        accuracies (list): List of accuracy scores for each model
+    @property
+    def fusion_results(self):
+        """
+        Get the fusion results.
+        """
+        if not self._fusion_results:
+            raise ValueError("Run EnsembleInference.fusion first.")
         
-    Returns:
-        np.array: Normalized weights (higher weight for higher accuracy)
-    """
-    accuracies = np.array(accuracies)
-    weights = np.maximum(accuracies, 1e-10)
-    weights = weights / weights.sum()
-    return weights
-
-def enhanced_arabic_fusion(accuracies_to_sentences: dict):
-    """
-    error_to_sentences: Dict[float, List[str]]
-        Example:
-        {
-            45.078: ["I sit down", "I go home"],
-            72.401: ["I sat down", "I went home"],
-            61.362: ["I sit down", "I return home"]
-        }
-    Returns: List[str] of fused sentences
-    """
-    # Sort errors and extract sentences
-    sorted_items = sorted(accuracies_to_sentences.items(), key=lambda x: x[0], reverse=True)
-    accuracies = [a for a, _ in sorted_items]
-    sentence_lists = [sents for _, sents in sorted_items]
+        return self._fusion_results
     
-    # Handle missing sentences
-    num_sentences = max(len(sents) for sents in sentence_lists)
-    for sents in sentence_lists:
-        while len(sents) < num_sentences:
-            sents.append("")  # Pad with empty sentence
-    
-    weights = compute_weights(accuracies)
-    fused_sentences = []
-
-    for i in range(num_sentences):
-        # Extract tokenized sentences
-        versions = []
-        for sent_list in sentence_lists:
-            try:
-                sent = sent_list[i].strip()
-                tokens = sent.split() if sent else []
-                versions.append(tokens)
-            except Exception as e:
-                LOGGER.error(f"Error processing sentence {i+1}, failed: {e}")
-                versions.append([])
-
-        # Select longest sentence as base
-        base = max(versions, key=len, default=[])
-        if not base:
-            fused_sentences.append("")
-            continue
-
-        # Initialize alignment and operation matrices
-        alignment_matrix = [defaultdict(float) for _ in range(len(base))]
-        operation_matrix = [defaultdict(float) for _ in range(len(base))]
-
-        for j, tokens in enumerate(versions):
-            if not tokens:
-                # Treat empty sentence as all deletions
-                for idx in range(len(base)):
-                    operation_matrix[idx]["delete"] += weights[j] * 0.5
-                    alignment_matrix[idx][""] += weights[j] * 0.5
-                continue
-
-            # Align using SequenceMatcher
-            matcher = SequenceMatcher(None, base, tokens)
-            aligned = [None] * len(base)
-
-            for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-                vote_weight = weights[j]  # Use model weight
-                if tag == 'equal':
-                    for i, j_idx in zip(range(i1, i2), range(j1, j2)):
-                        alignment_matrix[i][tokens[j_idx]] += vote_weight
-                        operation_matrix[i]["equal"] += vote_weight
-                        aligned[i] = True
-                elif tag == 'replace':
-                    for i, j_idx in zip(range(i1, i2), range(j1, j2)):
-                        pos = min(i, len(alignment_matrix) - 1)
-                        alignment_matrix[pos][tokens[j_idx]] += vote_weight
-                        operation_matrix[pos]["replace"] += vote_weight
-                        aligned[pos] = True
-                elif tag == 'insert':
-                    for offset, j_idx in enumerate(range(j1, j2)):
-                        pos = min(i1 + offset, len(alignment_matrix) - 1)
-                        alignment_matrix[pos][tokens[j_idx]] += vote_weight
-                        operation_matrix[pos]["insert"] += vote_weight
-                        aligned[pos] = True
-                elif tag == 'delete':
-                    for i in range(i1, i2):
-                        operation_matrix[i]["delete"] += vote_weight
-                        alignment_matrix[i][""] += vote_weight
-                        aligned[i] = True
-
-            # Vote for deletions for unaligned positions
-            for idx, flag in enumerate(aligned):
-                if flag is None:
-                    operation_matrix[idx]["delete"] += weights[j] * 0.5
-                    alignment_matrix[idx][""] += weights[j] * 0.5
-
-        # Fuse tokens
-        fused = []
-        for idx, (op_votes, word_votes) in enumerate(zip(operation_matrix, alignment_matrix)):
-            if op_votes:
-                best_op = max(op_votes.items(), key=lambda x: x[1])[0]
-                total_weight = sum(op_votes.values())
-                if best_op == "delete" and op_votes["delete"] > 0.6 * total_weight:
-                    continue  # Skip token if deletion strongly supported
-                elif best_op in ["equal", "replace", "insert"]:
-                    if word_votes:
-                        # Check if weights are close (within 10%)
-                        valid_words = {k: v for k, v in word_votes.items() if k != ""}
-                        if valid_words:
-                            max_weight = max(valid_words.values())
-                            close_weights = [k for k, v in valid_words.items() if v >= 0.9 * max_weight]
-                            if len(close_weights) > 1:
-                                # Fallback to majority voting
-                                word_counts = defaultdict(int)
-                                for j, tokens in enumerate(versions):
-                                    if idx < len(tokens):
-                                        word_counts[tokens[idx]] += 1
-                                best_word = max(word_counts.items(), key=lambda x: x[1])[0]
-                            else:
-                                # Use highest-weighted word
-                                best_word = max(valid_words.items(), key=lambda x: x[1])[0]
-                            fused.append(best_word)
-        fused_sentences.append(' '.join(fused))
-
-    return fused_sentences
+    @property
+    def overall_metrics(self):
+        return self._overall_metrics

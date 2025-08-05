@@ -126,7 +126,6 @@ class FilteredS2TMetrics:
         If single_sample=True, returns metrics for one sample or None if it doesn't meet criteria.
         """
         refs, hyps = FilteredS2TMetrics._normalize_inputs(refs, hyps)
-        
         # Handle single sample case
         if single_sample:
             if len(refs) != 1 or len(hyps) != 1:
@@ -162,6 +161,10 @@ class FilteredS2TMetrics:
         char_accuracies = []
         non_valid = 0
         for ref, hyp in zip(refs, hyps):
+            if not ref or not hyp:
+                non_valid += 1
+                continue
+            
             word_acc, sample_wer = FilteredS2TMetrics.compute_wer_accuracy(ref, hyp)
             if sample_wer > wer_threshold:
                 if verbose:
@@ -188,7 +191,6 @@ class FilteredS2TMetrics:
         word_avg = round(sum(word_accuracies) / len(word_accuracies), 3)
         char_avg = round(sum(char_accuracies) / len(char_accuracies), 3)
         average_score = round((word_avg + char_avg) / 2, 3)
-
         return {
             "word_accuracy": word_avg,
             "char_accuracy": char_avg,

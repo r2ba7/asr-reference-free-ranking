@@ -139,7 +139,7 @@ class FilteredS2TMetrics:
                 return {
                     "word_accuracy": None,
                     "char_accuracy": None,
-                    "bert_score": None,
+                    # "bert_score": None,
                     "average_score": None,
                 }
             

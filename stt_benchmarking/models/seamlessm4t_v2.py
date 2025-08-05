@@ -123,7 +123,7 @@ class SeamlessM4TInference:
                 except Exception as e:
                     LOGGER.error(f"Error processing sample {i+1}, Name: {audio_path}, failed: {e}")
                     LOGGER.info(f"{self._samples_info[audio_path]}")
-                    self._samples_info.pop(audio_path, None)
+                    self._samples_info[audio_path]['metrics'] = {"word_accuracy": None, "char_accuracy": None, "average_score": None}
                     continue
                 
         self._overall_metrics = metrics.FilteredS2TMetrics.evaluate(refs=all_refs_processed, hyps=all_hyps_processed)

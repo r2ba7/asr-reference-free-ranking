@@ -777,7 +777,7 @@ class EnsembleInferenceRefactored:
         weights = weights / weights.sum()
         return weights
     
-    def combine_models_transcriptions(self, *models, missing_value=None):
+    def combine_models_transcriptions(self, *models, missing_value=''):
         """
         Align samples from multiple models based on common keys.
         Sorts by audio_path for consistent ordering.
@@ -797,13 +797,13 @@ class EnsembleInferenceRefactored:
         all_keys = set()
         for model in models:
             if hasattr(model, 'samples_info') and model.samples_info:
+                print(len(model.samples_info))
                 all_keys.update(model.samples_info.keys())
         
         # Sort keys (audio_paths) alphabetically for consistent ordering
         self.sorted_audio_paths = sorted(all_keys)
-        
+        print(len(self.sorted_audio_paths))
         for model in models:
-            # Get model accuracy
             accuracy = None
             if hasattr(model, 'overall_metrics') and model.overall_metrics:
                 accuracy = model.overall_metrics.get('average_score')

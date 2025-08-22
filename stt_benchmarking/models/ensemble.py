@@ -2,6 +2,7 @@ from difflib import SequenceMatcher
 from collections import defaultdict
 from itertools import islice
 from collections import Counter
+import random
 
 import numpy as np
 
@@ -759,6 +760,7 @@ class EnsembleInferenceRefactored:
     def __init__(self):
         self._input_to_fusion = {}
         self._fusion_results = []
+        self._processed_results = []
         self._overall_metrics = None
     
     @staticmethod
@@ -1121,9 +1123,9 @@ class EnsembleInferenceRefactored:
             alignment_results = align_with_longest_strategy(weights=weights, reference=reference, transcriptions=transcriptions, reference_index=reference_index, reference_type=reference_type)
         return alignment_results
 
-    def voting_scheme(self, alignment_results):
+    def unweighted_voting_scheme(self, alignment_results):
         """
-        Implement majority voting scheme for operations and weighted voting for tokens.
+        Implement majority voting scheme for operations and random voting for tokens.
         
         Args:
             alignment_results: List of dictionaries containing alignment data for each model
@@ -1137,7 +1139,6 @@ class EnsembleInferenceRefactored:
             position_votes = {
                 'operations': [],
                 'tokens': [],
-                'weights': [],
                 'model_indices': [],
                 'is_reference_flags': []
             }
@@ -1145,7 +1146,6 @@ class EnsembleInferenceRefactored:
             for result in alignment_results:
                 position_votes['operations'].append(result['operations'][position])
                 position_votes['tokens'].append(result['tokens'][position])
-                position_votes['weights'].append(result['model_weight'])
                 position_votes['model_indices'].append(result['model_index'])
                 position_votes['is_reference_flags'].append(result['is_reference'])
             
@@ -1169,7 +1169,7 @@ class EnsembleInferenceRefactored:
             return majority_operation, operation_counts
         
         def vote_for_token(position_votes, majority_operation):
-            """Determine final token based on operation and weights"""
+            """Determine final token based on operation with random selection"""
             final_token = None
             
             if majority_operation == "<KEEP>":
@@ -1183,17 +1183,15 @@ class EnsembleInferenceRefactored:
                     final_token = position_votes['tokens'][0]
                     
             elif majority_operation in ["<REPLACE>", "<INSERT>"]:
-                # Weighted voting among models that chose this operation
-                operation_tokens = {}
+                # Random selection among models that chose this operation
+                operation_tokens = []
                 
                 for i, op in enumerate(position_votes['operations']):
                     if op == majority_operation and position_votes['tokens'][i] is not None:
-                        token = position_votes['tokens'][i]
-                        weight = position_votes['weights'][i]
-                        operation_tokens[token] = operation_tokens.get(token, 0) + weight
+                        operation_tokens.append(position_votes['tokens'][i])
                 
                 if operation_tokens:
-                    final_token = max(operation_tokens.items(), key=lambda x: x[1])[0]
+                    final_token = random.choice(operation_tokens)
                     
             elif majority_operation in ["<DELETE>", "<SKIP>"]:
                 final_token = None
@@ -1208,7 +1206,7 @@ class EnsembleInferenceRefactored:
                 for token in set(position_votes['tokens']):
                     if token is not None:
                         token_weights[token] = sum(
-                            position_votes['weights'][i] 
+                            1  # Count occurrences instead of weights
                             for i, t in enumerate(position_votes['tokens']) 
                             if t == token and position_votes['operations'][i] == majority_operation
                         )
@@ -1219,7 +1217,7 @@ class EnsembleInferenceRefactored:
                 'majority_operation': majority_operation,
                 'final_token': final_token,
                 'models_voted': len(position_votes['operations']),
-                'token_weights': token_weights
+                'token_weights': token_weights  # Now shows counts instead of weights
             }
         
         def construct_final_transcription(final_operations, final_tokens):
@@ -1301,6 +1299,187 @@ class EnsembleInferenceRefactored:
         }
         
         return voting_result
+    
+    # def voting_scheme(self, alignment_results):
+    #     """
+    #     Implement majority voting scheme for operations and weighted voting for tokens.
+        
+    #     Args:
+    #         alignment_results: List of dictionaries containing alignment data for each model
+            
+    #     Returns:
+    #         dict: Final voting result with operations, tokens, and metadata
+    #     """
+        
+    #     def collect_position_votes(alignment_results, position):
+    #         """Collect all votes for a specific position"""
+    #         position_votes = {
+    #             'operations': [],
+    #             'tokens': [],
+    #             'weights': [],
+    #             'model_indices': [],
+    #             'is_reference_flags': []
+    #         }
+            
+    #         for result in alignment_results:
+    #             position_votes['operations'].append(result['operations'][position])
+    #             position_votes['tokens'].append(result['tokens'][position])
+    #             position_votes['weights'].append(result['model_weight'])
+    #             position_votes['model_indices'].append(result['model_index'])
+    #             position_votes['is_reference_flags'].append(result['is_reference'])
+            
+    #         return position_votes
+        
+    #     def vote_for_operation(position_votes):
+    #         """Determine majority operation with tie-breaking"""
+    #         operation_counts = Counter(position_votes['operations'])
+    #         majority_operation = operation_counts.most_common(1)[0][0]
+            
+    #         # Handle ties with priority order
+    #         max_count = operation_counts.most_common(1)[0][1]
+    #         tied_operations = [op for op, count in operation_counts.items() if count == max_count]
+    #         if len(tied_operations) > 1:
+    #             priority_order = ["<KEEP>", "<REPLACE>", "<INSERT>", "<SKIP>", "<DELETE>"]
+    #             for preferred_op in priority_order:
+    #                 if preferred_op in tied_operations:
+    #                     majority_operation = preferred_op
+    #                     break
+            
+    #         return majority_operation, operation_counts
+        
+    #     def vote_for_token(position_votes, majority_operation):
+    #         """Determine final token based on operation and weights"""
+    #         final_token = None
+            
+    #         if majority_operation == "<KEEP>":
+    #             # Find reference token or use first available
+    #             for i, is_ref in enumerate(position_votes['is_reference_flags']):
+    #                 if is_ref and position_votes['operations'][i] in ["<KEEP>", "<REPLACE>"]:
+    #                     final_token = position_votes['tokens'][i]
+    #                     break
+                
+    #             if final_token is None:
+    #                 final_token = position_votes['tokens'][0]
+                    
+    #         elif majority_operation in ["<REPLACE>", "<INSERT>"]:
+    #             # Weighted voting among models that chose this operation
+    #             operation_tokens = {}
+                
+    #             for i, op in enumerate(position_votes['operations']):
+    #                 if op == majority_operation and position_votes['tokens'][i] is not None:
+    #                     token = position_votes['tokens'][i]
+    #                     weight = position_votes['weights'][i]
+    #                     operation_tokens[token] = operation_tokens.get(token, 0) + weight
+                
+    #             if operation_tokens:
+    #                 final_token = max(operation_tokens.items(), key=lambda x: x[1])[0]
+                    
+    #         elif majority_operation in ["<DELETE>", "<SKIP>"]:
+    #             final_token = None
+            
+    #         return final_token
+        
+    #     def create_voting_detail(position, operation_counts, majority_operation, final_token, position_votes):
+    #         """Create detailed voting information for a position"""
+    #         token_weights = {}
+            
+    #         if majority_operation in ["<REPLACE>", "<INSERT>"]:
+    #             for token in set(position_votes['tokens']):
+    #                 if token is not None:
+    #                     token_weights[token] = sum(
+    #                         position_votes['weights'][i] 
+    #                         for i, t in enumerate(position_votes['tokens']) 
+    #                         if t == token and position_votes['operations'][i] == majority_operation
+    #                     )
+            
+    #         return {
+    #             'position': position,
+    #             'operation_votes': dict(operation_counts),
+    #             'majority_operation': majority_operation,
+    #             'final_token': final_token,
+    #             'models_voted': len(position_votes['operations']),
+    #             'token_weights': token_weights
+    #         }
+        
+    #     def construct_final_transcription(final_operations, final_tokens):
+    #         """Build the final transcription from operations and tokens"""
+    #         final_transcription_words = []
+            
+    #         for operation, token in zip(final_operations, final_tokens):
+    #             if operation in ["<KEEP>", "<REPLACE>", "<INSERT>"] and token is not None:
+    #                 final_transcription_words.append(token)
+            
+    #         return " ".join(final_transcription_words)
+        
+    #     def calculate_confidence_score(alignment_results, operations_length):
+    #         """Calculate overall confidence based on operation agreement"""
+    #         total_positions = operations_length
+    #         operation_confidence = sum(
+    #             max(Counter([result['operations'][i] for result in alignment_results]).values()) / len(alignment_results)
+    #             for i in range(total_positions)
+    #         ) / total_positions if total_positions > 0 else 0
+            
+    #         return operation_confidence
+        
+    #     def create_metadata(alignment_results, final_operations):
+    #         """Create metadata about the voting results"""
+    #         return {
+    #             'reference_type': alignment_results[0].get('reference_type', 'unknown'),
+    #             'total_keep': final_operations.count('<KEEP>'),
+    #             'total_replace': final_operations.count('<REPLACE>'),
+    #             'total_insert': final_operations.count('<INSERT>'),
+    #             'total_delete': final_operations.count('<DELETE>'),
+    #             'total_skip': final_operations.count('<SKIP>')
+    #         }
+        
+    #     if not alignment_results or len(alignment_results) == 0:
+    #         voting_result = {
+    #             'final_transcription': '',
+    #             'final_operations': [],
+    #             'final_tokens': [],
+    #             'voting_details': {},
+    #             'confidence_score': 0,
+    #             'total_models': 0,
+    #             'operations_length': 0,
+    #             'metadata': {}
+    #         }
+    #         return voting_result
+        
+    #     # Main voting logic
+    #     operations_length = len(alignment_results[0]['operations'])
+    #     final_operations = []
+    #     final_tokens = []
+    #     voting_details = []
+        
+    #     # Process each position
+    #     for position in range(operations_length):
+    #         position_votes = collect_position_votes(alignment_results, position)
+    #         majority_operation, operation_counts = vote_for_operation(position_votes)
+    #         final_token = vote_for_token(position_votes, majority_operation)
+            
+    #         final_operations.append(majority_operation)
+    #         final_tokens.append(final_token)
+            
+    #         voting_detail = create_voting_detail(position, operation_counts, majority_operation, final_token, position_votes)
+    #         voting_details.append(voting_detail)
+        
+    #     # Construct final results
+    #     final_transcription = construct_final_transcription(final_operations, final_tokens)
+    #     confidence_score = calculate_confidence_score(alignment_results, operations_length)
+    #     metadata = create_metadata(alignment_results, final_operations)
+        
+    #     voting_result = {
+    #         'final_transcription': final_transcription,
+    #         'final_operations': final_operations,
+    #         'final_tokens': final_tokens,
+    #         'voting_details': voting_details,
+    #         'confidence_score': confidence_score,
+    #         'total_models': len(alignment_results),
+    #         'operations_length': operations_length,
+    #         'metadata': metadata
+    #     }
+        
+    #     return voting_result
 
     def fusion(self):
         def fuse_sample_transcriptions(weights, transcriptions):
@@ -1309,7 +1488,7 @@ class EnsembleInferenceRefactored:
 
             alignment_results = self.align_transcriptions_to_reference(weights=weights, reference=reference, reference_type=reference_type, reference_index=reference_index, transcriptions=transcriptions)
             # print(alignment_results)
-            voting_result = self.voting_scheme(alignment_results)
+            voting_result = self.unweighted_voting_scheme(alignment_results)
             # print(f"Voting result: {voting_result}")
             return voting_result
 
@@ -1330,12 +1509,11 @@ class EnsembleInferenceRefactored:
     
     def _process_fusion_results(self):
         final_transcripts = [result['final_transcription'] for result in self._fusion_results]
-        processed_results = ArabicTextProcessor.process_texts(final_transcripts)
-        return processed_results
+        self._processed_results = ArabicTextProcessor.process_texts(final_transcripts)
     
     def evaluate(self, processed_transcriptions):
-        processed_results = self._process_fusion_results()
-        self._overall_metrics = metrics.FilteredS2TMetrics.evaluate(refs=processed_transcriptions, hyps=processed_results)
+        self._process_fusion_results()
+        self._overall_metrics = metrics.FilteredS2TMetrics.evaluate(refs=processed_transcriptions, hyps=self._processed_results)
 
     def summary_of_evaluation(self):
         if not hasattr(self, 'overall_metrics') or not self._overall_metrics:
@@ -1385,6 +1563,15 @@ class EnsembleInferenceRefactored:
         
         return self._fusion_results
     
+    @property
+    def processed_results(self):
+        """
+        Get the processed results after fusion.
+        """
+        if not self._processed_results:
+            raise ValueError("Run EnsembleInference._process_fusion_results first.")
+        return self._processed_results
+
     @property
     def overall_metrics(self):
         return self._overall_metrics

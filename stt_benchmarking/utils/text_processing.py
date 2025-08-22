@@ -6,6 +6,7 @@ import unicodedata as ud
 import torch
 from arabert import preprocess
 import pyarabic.araby as araby
+from num2words import num2words
 
 from RDIreplacement.substitute import substitute
 
@@ -52,7 +53,34 @@ class ArabicTextProcessor:
             List[str]: List of texts with punctuation removed
         """
         return [''.join(char for char in text if not ud.category(char).startswith('P')) for text in texts]
+    
+    @staticmethod
+    def convert_numbers_to_arabic_text(texts: List[str]) -> List[str]:
+        """
+        Convert numeric values in texts to Arabic words.
+        
+        Args:
+            texts (List[str]): List of input texts
+        Returns:
+            List[str]: List of texts with numbers converted to Arabic words
+        """
+        def convert_single_text(text: str) -> str:
+            words = text.split()
+            converted_words = []
+            
+            for word in words:
+                if word.isdigit():
+                    try:
+                        converted_words.append(num2words(int(word), lang='ar'))
+                    except (ValueError, NotImplementedError):
+                        converted_words.append(word)  # Keep original if conversion fails
+                else:
+                    converted_words.append(word)
+            
+            return ' '.join(converted_words)
 
+        return [convert_single_text(text) for text in texts]
+        
     @staticmethod
     def normalize_final_letters(texts: List[str]) -> List[str]:
         """
@@ -287,6 +315,7 @@ class ArabicTextProcessor:
         
         processed_texts = ArabicTextProcessor.remove_punctuation(texts)
         processed_texts = ArabicTextProcessor.remove_tashkeel_tatweel(processed_texts)
+        processed_texts = ArabicTextProcessor.convert_numbers_to_arabic_text(processed_texts)
         replaced_texts = ArabicTextProcessor.substitute_words(processed_texts)
         processed_texts = ArabicTextProcessor.apply_word_mappings(replaced_texts)
         processed_texts = ArabicTextProcessor.apply_character_mappings(processed_texts)

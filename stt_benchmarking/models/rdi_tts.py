@@ -15,9 +15,9 @@ from stt_benchmarking.utils import (
 )
 
 
-class RDIInference:
+class RDI_STT_Inference:
 
-    URL = "http://34.57.97.217:6011/recognize"
+    URL = "http://34.57.97.217:6018/recognize"
     DATA = {"format": "json", "enable_ctm": "false", "model_version": "regular/Arabic/latest",}
 
     def __init__(self):
@@ -32,7 +32,7 @@ class RDIInference:
             audio_path = record["audio_path"]
             with open(audio_path, "rb") as audio_file:
                 files = {"file": audio_file}
-                response = requests.post(RDIInference.URL, data=RDIInference.DATA, files=files)
+                response = requests.post(RDI_STT_Inference.URL, data=RDI_STT_Inference.DATA, files=files)
             
             if response.status_code == 200:
                 result = response.json()

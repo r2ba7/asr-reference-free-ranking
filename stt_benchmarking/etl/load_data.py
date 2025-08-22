@@ -4,7 +4,7 @@ import torchaudio
 
 from stt_benchmarking.utils import text_processing
 
-def load_audio_transcripts(data_dir, is_egy):
+def load_audio_transcripts(data_dir, sep):
     if not os.path.isdir(data_dir):
         raise FileNotFoundError(f"Directory '{data_dir}' does not exist.")
 
@@ -22,15 +22,15 @@ def load_audio_transcripts(data_dir, is_egy):
     
     with open(metadata_path, "r", encoding="utf-8") as f:
         for line in f:
-            if is_egy:
+            if sep == "|":
+                parts = line.strip().split("|", 1)
+                audio_filename, transcription = parts
+                audio_source = "Saudi"
+            elif sep == " ":
                 parts = line.strip().split(" ", 1)
                 audio_filename, transcription = parts
                 audio_filename = audio_filename + ".wav"
                 audio_source = "Egypt"
-            else:
-                parts = line.strip().split("|", 1)
-                audio_filename, transcription = parts
-                audio_source = "Saudi"
             
             audio_path = os.path.join(waves_dir, audio_filename)  
             if os.path.exists(audio_path):

@@ -4,11 +4,14 @@ import torchaudio
 
 from stt_benchmarking.utils import text_processing
 
-def load_audio_transcripts(data_dir, sep):
+import os
+import torchaudio
+
+def load_audio_transcripts(data_dir, sep, metadata_file_name="metadata.txt"):
     if not os.path.isdir(data_dir):
         raise FileNotFoundError(f"Directory '{data_dir}' does not exist.")
 
-    metadata_path = os.path.join(data_dir, "metadata.txt")
+    metadata_path = os.path.join(data_dir, metadata_file_name)
     waves_dir = os.path.join(data_dir, "waves")
 
     if not os.path.isfile(metadata_path):
@@ -29,15 +32,23 @@ def load_audio_transcripts(data_dir, sep):
             elif sep == " ":
                 parts = line.strip().split(" ", 1)
                 audio_filename, transcription = parts
-                audio_filename = audio_filename + ".wav"
+                if "wav" not in audio_filename:
+                    audio_filename = audio_filename + ".wav"
                 audio_source = "Egypt"
             
             audio_path = os.path.join(waves_dir, audio_filename)  
             if os.path.exists(audio_path):
                 waveform, sample_rate = torchaudio.load(audio_path)
                 waveform = waveform.squeeze(0)
+
+                # 🔹 Resample if not 16k
+                target_sr = 16000
+                if sample_rate != target_sr:
+                    resampler = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=target_sr)
+                    waveform = resampler(waveform)
+                    sample_rate = target_sr
+
                 duration_sec = waveform.shape[-1] / sample_rate
-                
                 samples.append({
                     "audio_path": audio_path,
                     "waveform": waveform,
@@ -54,10 +65,8 @@ def load_audio_transcripts(data_dir, sep):
 
     # Bulk normalize all transcriptions at once
     if transcriptions:
-        processed_transcriptions = text_processing.ArabicTextProcessor.process_texts(transcriptions)
-        normalized_transcriptions = text_processing.ArabicTextProcessor.normalize_texts(transcriptions)
+        normalized_transcriptions = text_processing.StandardArabicTextProcessor.normalize_texts(texts=transcriptions)
         for i, sample in enumerate(samples):
-            sample["processed_transcription"] = processed_transcriptions[i]
             sample["normalized_transcription"] = normalized_transcriptions[i]
 
     return samples

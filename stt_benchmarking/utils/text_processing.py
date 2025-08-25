@@ -322,3 +322,130 @@ class ArabicTextProcessor:
         processed_texts = ArabicTextProcessor.normalize_final_letters(processed_texts)
         processed_texts = [' '.join(text.split()) for text in processed_texts]
         return processed_texts[0] if is_single_input else processed_texts
+    
+
+import unicodedata
+from typing import List, Union
+import re
+
+class StandardArabicTextProcessor:
+    """
+    A comprehensive Arabic text processor for Arabic-only texts, handling cleaning,
+    normalization, and custom text replacements for Arabic ASR tasks, following
+    the normalization steps from Chowdhury et al. (arXiv:2105.14779).
+    All functions operate on lists for optimal bulk processing.
+    """
+    EASTERN_TO_WESTERN_NUM = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+        # Dictionary for normalizing Hamzas and Maddas
+    CHAR_MAPPING = {
+        'أ': 'ا',  # Replace أ with ا
+        'إ': 'ا',
+        'آ': 'ا'
+    }
+        # Arabic diacritics to remove (Unicode points for common Arabic diacritics)
+    DIACRITICS = re.compile(r'[\u0617-\u061A\u064B-\u065F]')
+
+    @staticmethod
+    def remove_punctuation(texts: List[str]) -> List[str]:
+        """
+        Remove punctuation from Arabic texts using Unicode categories, keeping % and @.
+        
+        Args:
+            texts (List[str]): List of input Arabic texts
+            
+        Returns:
+            List[str]: List of texts with punctuation removed except % and @
+        """
+        return [
+            ''.join(char for char in text if not (
+                unicodedata.category(char).startswith('P') and char not in ['%', '@']
+            )) for text in texts
+        ]
+
+    @staticmethod
+    def remove_diacritics(texts: List[str]) -> List[str]:
+        """
+        Remove Arabic diacritics from texts.
+        
+        Args:
+            texts (List[str]): List of input Arabic texts
+            
+        Returns:
+            List[str]: List of texts with diacritics removed
+        """
+        diacritics_pattern = re.compile(r'[\u0617-\u061A\u064B-\u065F]')
+        return [diacritics_pattern.sub('', text) for text in texts]
+
+    @staticmethod
+    def transliterate_digits(texts: List[str]) -> List[str]:
+        """
+        Convert Eastern Arabic numerals to Western Arabic numerals using translation table.
+        
+        Args:
+            texts (List[str]): List of input Arabic texts
+            
+        Returns:
+            List[str]: List of texts with Arabic numerals converted to Western numerals
+        """
+        return [text.translate(StandardArabicTextProcessor.EASTERN_TO_WESTERN_NUM) for text in texts]
+    
+    @staticmethod
+    def normalize_hamzas_and_maddas(texts: List[str]) -> List[str]:
+        """
+        Normalize Hamzas and Maddas using the provided character mapping.
+        
+        Args:
+            texts (List[str]): List of input Arabic texts
+            
+        Returns:
+            List[str]: List of texts with normalized Hamzas and Maddas
+        """
+        def replace_chars(text: str) -> str:
+            for src_char, tgt_char in StandardArabicTextProcessor.CHAR_MAPPING.items():
+                text = text.replace(src_char, tgt_char)
+            return text
+        return [replace_chars(text) for text in texts]
+
+    @staticmethod
+    def normalize_texts(texts: Union[str, List[str]], normalize_final_letters: bool = True) -> Union[str, List[str]]:
+        """
+        Process Arabic text(s) through the complete Arabic text processing pipeline.
+        All processing is done in bulk mode for optimal performance.
+        
+        Args:
+            texts (str or List[str]): Input Arabic text(s) to process
+            normalize_final_letters (bool): Whether to normalize final letters (ى↔ي, ة↔ه)
+            
+        Returns:
+            str or List[str]: Processed text(s) - same type as input
+        """
+        # Convert single string to list for uniform processing
+        is_single_input = isinstance(texts, str)
+        if is_single_input:
+            texts = [texts]
+        elif isinstance(texts, list):
+            pass  # Already a list
+        else:
+            raise TypeError("Input must be either a string or a list of strings")
+
+        # Step 1: Remove punctuation (keeping % and @)
+        processed_texts = StandardArabicTextProcessor.remove_punctuation(texts)
+
+        # Step 2: Remove Arabic diacritics
+        processed_texts = StandardArabicTextProcessor.remove_diacritics(processed_texts)
+
+        # Step 3: Transliterate Arabic digits to Western numerals
+        processed_texts = StandardArabicTextProcessor.transliterate_digits(processed_texts)
+
+        # Step 4: Normalize Hamzas and Maddas
+        processed_texts = StandardArabicTextProcessor.normalize_hamzas_and_maddas(processed_texts)
+
+        # Step 5: Optional normalization of final letters (ى to ي, ة to ه)
+        if normalize_final_letters:
+            processed_texts = [
+                text.replace('ى', 'ي').replace('ة', 'ه')
+                for text in processed_texts
+            ]
+
+        # Return in the same format as input
+        return processed_texts[0] if is_single_input else processed_texts

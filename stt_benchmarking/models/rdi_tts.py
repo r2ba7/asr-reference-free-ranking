@@ -53,7 +53,7 @@ def load_noise_files(noise_dir="../data/noise_datasets"):
     folder_files_map = {}
 
     if not os.path.exists(noise_dir):
-        print(f"Warning: Noise directory {noise_dir} not found!")
+        LOGGER.warning(f"Warning: Noise directory {noise_dir} not found!")
         return {}
 
     # Only consider directories, skip .rar or other files
@@ -67,7 +67,7 @@ def load_noise_files(noise_dir="../data/noise_datasets"):
             if files:  # Only keep non-empty folders
                 folder_files_map[entry.path] = files
 
-    print(f"Loaded {sum(len(v) for v in folder_files_map.values())} noise files "
+    LOGGER.info(f"Loaded {sum(len(v) for v in folder_files_map.values())} noise files "
           f"from {len(folder_files_map)} folders in {noise_dir}")
     return folder_files_map
 
@@ -86,7 +86,7 @@ def add_noise_to_audio(audio_data, sample_rate, folder_files_map, snr_choices=(5
         noisy_audio: numpy array of noisy audio samples
     """
     if not folder_files_map:
-        print("Warning: No noise files available, returning original audio")
+        LOGGER.error("Warning: No noise files available, returning original audio")
         return audio_data
 
     # Step 1: Pick a folder uniformly
@@ -132,12 +132,12 @@ def add_noise_to_audio(audio_data, sample_rate, folder_files_map, snr_choices=(5
         return noisy_audio
 
     except Exception as e:
-        print(f"Error adding noise from {noise_file}: {e}")
+        LOGGER.error(f"Error adding noise from {noise_file}: {e}")
         return audio_data
 
 class RDI_TTS_Inference:
 
-    URL = "http://34.57.97.217:6018"
+    URL = "http://34.57.97.217:6018/speak"
     DATA = {"format": "json", "lang": "ar", "keep_original_tashkeel": False, "auto_tashkeel": True}
     SPEAKERS = ["male-nabil", "female-eman"]
 
@@ -159,32 +159,39 @@ class RDI_TTS_Inference:
             payload = RDI_TTS_Inference.DATA.copy()
             payload["text"] = text
             payload["speaker"] = random.choice(RDI_TTS_Inference.SPEAKERS)
-            url = f"{RDI_TTS_Inference.URL}/speak"
-            response = requests.post(url, json=payload)
+            response = requests.post(RDI_TTS_Inference.URL, json=payload)
             if response.status_code != 200:
                 raise Exception(f"HTTP {response.status_code} - retrying...")
             
             data = response.json()
             wave_base64 = data['wave']
             wave_data = base64.urlsafe_b64decode(wave_base64)
-            clean_wav_name = generate_filename_with_index(index, output_dir="../data/clean_synthetic_speech_records", suffix="_clean")
+            clean_wav_name = generate_filename_with_index(index, output_dir="../data/clean_synthetic_speech_records/waves", suffix="_clean")
             save_audio(wav_data=wave_data, filename=clean_wav_name)
-            results = {"clean_path": clean_wav_name, "noisy_path": None}
+            
+            # ✅ Return both the results AND the original index and text
+            results = {
+                "clean_path": clean_wav_name, 
+                "noisy_path": None,
+                "index": index,  # Add original index
+                "text": text     # Add original text
+            }
+            
             if self.create_noisy_version and self.noise_files:
                 try:
                     audio_data, sample_rate = sf.read(clean_wav_name)
                     noisy_audio = add_noise_to_audio(audio_data, sample_rate, self.noise_files)
-                    noisy_wav_name = generate_filename_with_index(index, output_dir="../data/noisy_synthetic_speech_records", suffix="_noisy")
+                    noisy_wav_name = generate_filename_with_index(index, output_dir="../data/noisy_synthetic_speech_records/waves", suffix="_noisy")
                     sf.write(noisy_wav_name, noisy_audio, sample_rate)
                     results["noisy_path"] = noisy_wav_name
                     
                 except Exception as e:
-                    print(f"Error creating noisy version for index {index}: {e}")
+                    LOGGER.error(f"Error creating noisy version for index {index}: {e}")
             
             return results
                
         except (KeyError, json.JSONDecodeError, base64.binascii.Error) as e:
-            print(f"Error processing response: {e}")
+            LOGGER.error(f"Error processing response: {e}")
             raise e
         except Exception as e:
             raise e
@@ -202,9 +209,6 @@ class RDI_TTS_Inference:
         Returns:
             Dict with clean and noisy audio file paths
         """
-        all_clean_paths = []
-        all_noisy_paths = []
-        
         if not isinstance(texts, list):
             texts = [texts]
 
@@ -214,40 +218,55 @@ class RDI_TTS_Inference:
         self._noisy_audio_paths = []
         self._noisy_text_audio_mapping = {}
         
+        # ✅ Use dictionaries to maintain proper index mapping
+        clean_results = {}  # index -> path
+        noisy_results = {}  # index -> path
+        
         with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = [executor.submit(self.process_single_file, text, i) for i, text in enumerate(texts)]
-            for i, future in enumerate(tqdm(as_completed(futures), total=len(futures), desc="Generating audio files")):
+            # Create future -> (index, text) mapping
+            future_to_info = {
+                executor.submit(self.process_single_file, text, i): (i, text) 
+                for i, text in enumerate(texts)
+            }
+            
+            for future in tqdm(as_completed(future_to_info), total=len(future_to_info), desc="Generating audio files"):
+                original_index, original_text = future_to_info[future]
                 try:
                     results = future.result()
                     
+                    # ✅ Use the original index from the results (double-check)
+                    assert results["index"] == original_index, f"Index mismatch: {results['index']} != {original_index}"
+                    assert results["text"] == original_text, f"Text mismatch for index {original_index}"
+                    
                     # Store clean audio info
                     if results["clean_path"]:
-                        all_clean_paths.append(results["clean_path"])
-                        self._text_audio_mapping[results["clean_path"]] = texts[i]
+                        clean_results[original_index] = results["clean_path"]
+                        self._text_audio_mapping[results["clean_path"]] = original_text
                     
                     # Store noisy audio info
                     if results["noisy_path"]:
-                        all_noisy_paths.append(results["noisy_path"])
-                        self._noisy_text_audio_mapping[results["noisy_path"]] = texts[i]
+                        noisy_results[original_index] = results["noisy_path"]
+                        self._noisy_text_audio_mapping[results["noisy_path"]] = original_text
                    
                 except Exception as e:
-                    print(f"Failed to process text '{texts[i][:50]}...': {e}")
-                    all_clean_paths.append(None)
-                    all_noisy_paths.append(None)
+                    LOGGER.error(f"Failed to process text '{original_text[:50]}...' at index {original_index}: {e}")
+                    # Keep None values to maintain indexing
+                    clean_results[original_index] = None
+                    noisy_results[original_index] = None
         
-        # Filter out None values
-        self._generated_audio_paths = [path for path in all_clean_paths if path is not None]
-        self._noisy_audio_paths = [path for path in all_noisy_paths if path is not None]
+        # ✅ Convert to ordered lists (preserve original order)
+        self._generated_audio_paths = [clean_results.get(i) for i in range(len(texts)) if clean_results.get(i) is not None]
+        self._noisy_audio_paths = [noisy_results.get(i) for i in range(len(texts)) if noisy_results.get(i) is not None]
         
         # Save metadata files
         if save_metadata_flag:
             if self._text_audio_mapping:
                 clean_metadata_path = save_metadata(self._text_audio_mapping, output_dir="../data/clean_synthetic_speech_records", filename="clean_metadata.txt")
-                print(f"Clean metadata saved to: {clean_metadata_path}")
+                LOGGER.info(f"Clean metadata saved to: {clean_metadata_path}")
             
             if self._noisy_text_audio_mapping:
                 noisy_metadata_path = save_metadata(self._noisy_text_audio_mapping, output_dir="../data/noisy_synthetic_speech_records", filename="noisy_metadata.txt")
-                print(f"Noisy metadata saved to: {noisy_metadata_path}")
+                LOGGER.info(f"Noisy metadata saved to: {noisy_metadata_path}")
         
         results = {
             "clean_paths": self._generated_audio_paths,
@@ -256,7 +275,7 @@ class RDI_TTS_Inference:
             "noisy_count": len(self._noisy_audio_paths)
         }
         
-        print(f"Successfully generated {results['clean_count']} clean and {results['noisy_count']} noisy audio files")
+        LOGGER.info(f"Successfully generated {results['clean_count']} clean and {results['noisy_count']} noisy audio files")
         return results
     
     @property
@@ -278,5 +297,3 @@ class RDI_TTS_Inference:
     def noisy_audio_paths(self):
         """Return list of noisy audio file paths"""
         return self._noisy_audio_paths
-
-

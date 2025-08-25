@@ -30,7 +30,6 @@ class Fastconformer_hybridInference:
             tuple: (model, processor)
         """
         model = nemo_asr.models.EncDecHybridRNNTCTCBPEModel.from_pretrained(model_name="nvidia/stt_ar_fastconformer_hybrid_large_pcd_v1.0")
-
         LOGGER.info(f"Loaded model stt conformer hybrid")
         return model
     
@@ -43,7 +42,7 @@ class Fastconformer_hybridInference:
             records (list): List of audio records containing waveform, sample_rate, 
                           transcription, and audio_path
         """
-        all_refs_processed = []
+        all_refs_normalized = []
         all_hyps = []
         all_audio_paths = []
         if not isinstance(records, list):
@@ -52,7 +51,7 @@ class Fastconformer_hybridInference:
         for i, record in tqdm(enumerate(records), total=len(records), desc="Processing Records"):
             audio_path = record['audio_path']
             transcription = record['transcription']
-            processed_transcription = record['processed_transcription']
+            normalized_transcription = record['normalized_transcription']
             all_audio_paths.append(audio_path)
             try:
                 output = self.model.transcribe([audio_path])
@@ -63,26 +62,23 @@ class Fastconformer_hybridInference:
                 LOGGER.error(f"Sample {i+1}, Name: {audio_path}, failed: {e}")
                 continue
 
-            all_refs_processed.append(processed_transcription)
+            all_refs_normalized.append(normalized_transcription)
             all_hyps.append(validated_raw_prediction)
             self._samples_info[audio_path] = {
                 "raw_transcription": transcription,
-                "processed_transcription": processed_transcription,
+                "normalized_transcription": normalized_transcription,
                 "raw_prediction": validated_raw_prediction,
                 "normalized_prediction": None,
-                "processed_prediction": None 
             }
 
-        all_hyps_normalized = text_processing.ArabicTextProcessor.normalize_texts(all_hyps)
-        all_hyps_processed =  text_processing.ArabicTextProcessor.process_texts(all_hyps)  
+        all_hyps_normalized = text_processing.StandardArabicTextProcessor.normalize_texts(all_hyps)
         for i, audio_path in enumerate(all_audio_paths):
             if audio_path in self._samples_info:
                 try:
                     self._samples_info[audio_path]["normalized_prediction"] = all_hyps_normalized[i]
-                    self._samples_info[audio_path]["processed_prediction"] = all_hyps_processed[i]  
                     sample_metrics = metrics.FilteredS2TMetrics.evaluate(
-                        refs=all_refs_processed[i],
-                        hyps=all_hyps_processed[i],
+                        refs=all_refs_normalized[i],
+                        hyps=all_hyps_normalized[i],
                         single_sample=True
                     )
                     self._samples_info[audio_path]["metrics"] = sample_metrics
@@ -93,7 +89,7 @@ class Fastconformer_hybridInference:
                     self._samples_info[audio_path]['metrics'] = {"word_accuracy": None, "char_accuracy": None, "average_score": None}
                     continue
 
-        self._overall_metrics = metrics.FilteredS2TMetrics.evaluate(refs=all_refs_processed, hyps=all_hyps_processed)
+        self._overall_metrics = metrics.FilteredS2TMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
 
     def summary_of_evaluation(self):
         """

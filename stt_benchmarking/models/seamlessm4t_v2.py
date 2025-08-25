@@ -12,7 +12,6 @@ from stt_benchmarking.utils import (
     metrics
 )
 
-
 class SeamlessM4TInference:
     """
     A class for loading and running inference with Seamless M4T models.
@@ -69,7 +68,7 @@ class SeamlessM4TInference:
             records (list): List of audio records containing waveform, sample_rate, 
                           transcription, and audio_path
         """
-        all_refs_processed = []
+        all_refs_normalized = []
         all_hyps = []
         all_audio_paths = []
         if not isinstance(records, list):
@@ -79,7 +78,7 @@ class SeamlessM4TInference:
             waveform = record["waveform"]
             audio_path = record['audio_path']
             transcription = record['transcription']
-            processed_transcription = record['processed_transcription']
+            normalized_transcription = record['normalized_transcription']
             all_audio_paths.append(audio_path)
             try:
                 inputs = self.processor(
@@ -91,32 +90,28 @@ class SeamlessM4TInference:
                     output = self.model.generate(**inputs, generate_speech=False, tgt_lang="arb")
 
                 raw_prediction = self.processor.decode(output[0][0].tolist(), skip_special_tokens=True)
-                validated_raw_prediction = validate.ValidateText.validate_text_in_ar(raw_prediction)
 
             except Exception as e:
                 LOGGER.error(f"⚠️ Sample {i+1}, Name: {record['audio_path']}, failed: {e}")
                 continue
 
-            all_refs_processed.append(processed_transcription)
-            all_hyps.append(validated_raw_prediction)
+            all_refs_normalized.append(normalized_transcription)
+            all_hyps.append(raw_prediction)
             self._samples_info[audio_path] = {
                 "raw_transcription": transcription,
-                "processed_transcription": processed_transcription,
-                "raw_prediction": validated_raw_prediction,
+                "normalized_transcription": normalized_transcription,
+                "raw_prediction": raw_prediction,
                 "normalized_prediction": None,
-                "processed_prediction": None    
             }
 
-        all_hyps_normalized = text_processing.ArabicTextProcessor.normalize_texts(all_hyps)
-        all_hyps_processed =  text_processing.ArabicTextProcessor.process_texts(all_hyps)     
+        all_hyps_normalized = text_processing.StandardArabicTextProcessor.normalize_texts(all_hyps)
         for i, audio_path in enumerate(all_audio_paths):
             if audio_path in self._samples_info:
                 try:
                     self._samples_info[audio_path]["normalized_prediction"] = all_hyps_normalized[i]
-                    self._samples_info[audio_path]["processed_prediction"] = all_hyps_processed[i]
-                    sample_metrics = metrics.FilteredS2TMetrics.evaluate(
-                        refs=all_refs_processed[i],
-                        hyps=all_hyps_processed[i],
+                    sample_metrics = metrics.StandardSTTMetrics.evaluate(
+                        refs=all_refs_normalized[i],
+                        hyps=all_hyps_normalized[i],
                         single_sample=True
                     )
                     self._samples_info[audio_path]["metrics"] = sample_metrics
@@ -126,7 +121,7 @@ class SeamlessM4TInference:
                     self._samples_info[audio_path]['metrics'] = {"word_accuracy": None, "char_accuracy": None, "average_score": None}
                     continue
                 
-        self._overall_metrics = metrics.FilteredS2TMetrics.evaluate(refs=all_refs_processed, hyps=all_hyps_processed)
+        self._overall_metrics = metrics.StandardSTTMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
 
     def summary_of_evaluation(self):
         """

@@ -8,7 +8,7 @@ from tqdm import tqdm
 
 from . import LOGGER
 from stt_benchmarking.utils import (
-    postprocess,
+    text_processing,
     helpers, 
     decorators, 
     metrics
@@ -16,8 +16,8 @@ from stt_benchmarking.utils import (
 
 class RDI_STT_Inference:
 
-    URL = "http://34.57.97.217:6018/recognize"
-    DATA = {"format": "json", "enable_ctm": "false", "model_version": "regular/Arabic/latest",}
+    URL = "http://34.57.97.217:6011/recognize"
+    DATA = {"format": "json", "enable_ctm": "false", "model_version": "regular/Arabic/latest"}
 
     def __init__(self):
         self._overall_metrics = None
@@ -26,9 +26,9 @@ class RDI_STT_Inference:
     @decorators.Decorators.timeout_with_retry
     def process_single_file(self, record):
         try:
+            audio_path = record["audio_path"]
             transcription = record['transcription']
             normalized_transcription = record['normalized_transcription']
-            audio_path = record["audio_path"]
             with open(audio_path, "rb") as audio_file:
                 files = {"file": audio_file}
                 response = requests.post(RDI_STT_Inference.URL, data=RDI_STT_Inference.DATA, files=files)
@@ -40,13 +40,15 @@ class RDI_STT_Inference:
                     "raw_transcription": transcription,
                     "normalized_transcription": normalized_transcription,
                     "raw_prediction": raw_prediction,
-                    "normalized_prediction": None
+                    "normalized_prediction": None,
                 }
-                
-                return normalized_transcription, raw_prediction, audio_path
+                return transcription, normalized_transcription, raw_prediction, audio_path
             
             else:
-                raise Exception(f"HTTP {response.status_code} - retrying...")
+                raise Exception(
+                    f"HTTP {response.status_code} - {response.reason}\n"
+                    f"Response Body: {response.text[:500]}"  # limit to avoid huge dumps
+                )
                 
         except Exception as e:
             raise e
@@ -54,7 +56,8 @@ class RDI_STT_Inference:
     @decorators.Decorators.calculate_execution_time
     def run_inference(self, records):
         all_refs = []
-        all_hyps_raw = []
+        all_refs_normalized = []
+        all_hyps = [] = []
         all_audio_paths = []
 
         if not isinstance(records, list):
@@ -63,23 +66,31 @@ class RDI_STT_Inference:
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = [executor.submit(self.process_single_file, record) for record in records]
             for future in tqdm(as_completed(futures), total=len(futures), desc="Processing audio files"):
-                ref, hyp_raw, audio_path = future.result()
-                all_refs.append(ref)
-                all_hyps_raw.append(hyp_raw)
+                transcription, normalized_transcription, hyp_raw, audio_path = future.result()
+                all_refs.append(transcription)
+                all_refs_normalized.append(normalized_transcription)
+                all_hyps.append(hyp_raw)
                 all_audio_paths.append(audio_path)
         
-        all_hyps_normalized = postprocess.normalize_text(all_hyps_raw)
+        all_hyps_normalized = text_processing.StandardArabicTextProcessor.normalize_texts(all_hyps)
         for i, audio_path in enumerate(all_audio_paths):
             if audio_path in self._samples_info:
-                self._samples_info[audio_path]["normalized_prediction"] = all_hyps_normalized[i]
-                sample_metrics = metrics.S2TMetrics.evaluate(
-                    refs=all_refs[i],
-                    hyps=all_hyps_normalized[i]
-                )
-                self._samples_info[audio_path]["metrics"] = sample_metrics
+                try:
+                    self._samples_info[audio_path]["normalized_prediction"] = all_hyps_normalized[i]
+                    sample_metrics = metrics.FilteredS2TMetrics.evaluate(
+                        refs=all_refs_normalized[i],
+                        hyps=all_hyps_normalized[i],
+                        single_sample=True
+                    )
+                    self._samples_info[audio_path]["metrics"] = sample_metrics
+                except Exception as e:
+                    LOGGER.error(f"Error processing sample {i+1}, Name: {audio_path}, failed: {e}")
+                    LOGGER.info(f"{self._samples_info[audio_path]}")
+                    self._samples_info[audio_path]['metrics'] = {"word_accuracy": None, "char_accuracy": None, "average_score": None}
+                    continue
         
         self.reorder_samples_info(records=records)
-        self._overall_metrics = metrics.S2TMetrics.evaluate(refs=all_refs, hyps=all_hyps_normalized)
+        self._overall_metrics = metrics.FilteredS2TMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
 
     def reorder_samples_info(self, records):
         ordered_info = OrderedDict()

@@ -1133,7 +1133,6 @@ class EnsembleInferenceRefactored:
         Returns:
             dict: Final voting result with operations, tokens, and metadata
         """
-        
         def collect_position_votes(alignment_results, position):
             """Collect all votes for a specific position"""
             position_votes = {
@@ -1487,9 +1486,10 @@ class EnsembleInferenceRefactored:
             # print(f"Reference: {reference}, type: {reference_type}, index: {reference_index}")
 
             alignment_results = self.align_transcriptions_to_reference(weights=weights, reference=reference, reference_type=reference_type, reference_index=reference_index, transcriptions=transcriptions)
-            # print(alignment_results)
+            candidates_tokens = [element['tokens'] for element in alignment_results]
             voting_result = self.unweighted_voting_scheme(alignment_results)
-            # print(f"Voting result: {voting_result}")
+            voting_result["candidates_tokens"] = candidates_tokens
+            print(voting_result['final_tokens'], voting_result['candidates_tokens'])
             return voting_result
 
         if not self.input_to_fusion:

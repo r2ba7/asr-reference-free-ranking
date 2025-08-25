@@ -336,19 +336,48 @@ class StandardArabicTextProcessor:
     All functions operate on lists for optimal bulk processing.
     """
     EASTERN_TO_WESTERN_NUM = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
-        # Dictionary for normalizing Hamzas and Maddas
+    
+    # Dictionary for normalizing Hamzas and Maddas
     CHAR_MAPPING = {
         'أ': 'ا',  # Replace أ with ا
         'إ': 'ا',
         'آ': 'ا'
     }
-        # Arabic diacritics to remove (Unicode points for common Arabic diacritics)
+    
+    # Arabic diacritics to remove (Unicode points for common Arabic diacritics)
     DIACRITICS = re.compile(r'[\u0617-\u061A\u064B-\u065F]')
+    
+    # Symbols and special characters to remove
+    SYMBOLS_TO_REMOVE = re.compile(r'[<>\-_\[\]{}().,;:!?"\'/\\|~`^*+=&$#@%]')
+    
+    # English letters pattern (a-z, A-Z)
+    ENGLISH_LETTERS = re.compile(r'[a-zA-Z]')
+
+    @staticmethod
+    def remove_symbols_and_english_letters(texts: List[str]) -> List[str]:
+        """
+        Remove all symbols and English letters while keeping Arabic text and numbers.
+        
+        Args:
+            texts (List[str]): List of input Arabic texts
+            
+        Returns:
+            List[str]: List of texts with symbols and English letters removed
+        """
+        processed_texts = []
+        for text in texts:
+            # Remove symbols first
+            text = StandardArabicTextProcessor.SYMBOLS_TO_REMOVE.sub('', text)
+            # Remove English letters
+            text = StandardArabicTextProcessor.ENGLISH_LETTERS.sub('', text)
+            processed_texts.append(text)
+        return processed_texts
 
     @staticmethod
     def remove_punctuation(texts: List[str]) -> List[str]:
         """
         Remove punctuation from Arabic texts using Unicode categories, keeping % and @.
+        This method is now enhanced to remove more comprehensive symbols.
         
         Args:
             texts (List[str]): List of input Arabic texts
@@ -356,11 +385,17 @@ class StandardArabicTextProcessor:
         Returns:
             List[str]: List of texts with punctuation removed except % and @
         """
-        return [
-            ''.join(char for char in text if not (
+        processed_texts = []
+        for text in texts:
+            # Remove all punctuation and symbols except % and @
+            cleaned_text = ''.join(char for char in text if not (
                 unicodedata.category(char).startswith('P') and char not in ['%', '@']
-            )) for text in texts
-        ]
+            ) and not (
+                # Remove additional symbol categories
+                unicodedata.category(char).startswith('S')  # Symbol categories
+            ))
+            processed_texts.append(cleaned_text)
+        return processed_texts
 
     @staticmethod
     def remove_diacritics(texts: List[str]) -> List[str]:
@@ -407,6 +442,19 @@ class StandardArabicTextProcessor:
         return [replace_chars(text) for text in texts]
 
     @staticmethod
+    def clean_whitespace(texts: List[str]) -> List[str]:
+        """
+        Clean excessive whitespace - remove multiple spaces and trim.
+        
+        Args:
+            texts (List[str]): List of input texts
+            
+        Returns:
+            List[str]: List of texts with cleaned whitespace
+        """
+        return [re.sub(r'\s+', ' ', text.strip()) for text in texts]
+
+    @staticmethod
     def normalize_texts(texts: Union[str, List[str]], normalize_final_letters: bool = True) -> Union[str, List[str]]:
         """
         Process Arabic text(s) through the complete Arabic text processing pipeline.
@@ -428,24 +476,30 @@ class StandardArabicTextProcessor:
         else:
             raise TypeError("Input must be either a string or a list of strings")
 
-        # Step 1: Remove punctuation (keeping % and @)
-        processed_texts = StandardArabicTextProcessor.remove_punctuation(texts)
+        # Step 1: Remove symbols and English letters (NEW STEP)
+        processed_texts = StandardArabicTextProcessor.remove_symbols_and_english_letters(texts)
 
-        # Step 2: Remove Arabic diacritics
+        # Step 2: Remove punctuation (keeping % and @) - enhanced version
+        processed_texts = StandardArabicTextProcessor.remove_punctuation(processed_texts)
+
+        # Step 3: Remove Arabic diacritics
         processed_texts = StandardArabicTextProcessor.remove_diacritics(processed_texts)
 
-        # Step 3: Transliterate Arabic digits to Western numerals
+        # Step 4: Transliterate Arabic digits to Western numerals
         processed_texts = StandardArabicTextProcessor.transliterate_digits(processed_texts)
 
-        # Step 4: Normalize Hamzas and Maddas
+        # Step 5: Normalize Hamzas and Maddas
         processed_texts = StandardArabicTextProcessor.normalize_hamzas_and_maddas(processed_texts)
 
-        # Step 5: Optional normalization of final letters (ى to ي, ة to ه)
+        # Step 6: Optional normalization of final letters (ى to ي, ة to ه)
         if normalize_final_letters:
             processed_texts = [
                 text.replace('ى', 'ي').replace('ة', 'ه')
                 for text in processed_texts
             ]
+
+        # Step 7: Clean excessive whitespace (NEW STEP)
+        processed_texts = StandardArabicTextProcessor.clean_whitespace(processed_texts)
 
         # Return in the same format as input
         return processed_texts[0] if is_single_input else processed_texts

@@ -1,14 +1,14 @@
 from difflib import SequenceMatcher
 from collections import defaultdict
 from itertools import islice
-from collections import Counter
+from collections import Counter, OrderedDict
 import random
 
 import numpy as np
 
-from stt_benchmarking.utils.text_processing import ArabicTextProcessor
+from stt_benchmarking.utils import text_processing
 from stt_benchmarking.utils import metrics
-from . import LOGGER
+from .. import LOGGER
 
 class EnsembleInference:
     def __init__(self):
@@ -781,52 +781,51 @@ class EnsembleInferenceRefactored:
     
     def combine_models_transcriptions(self, *models, missing_value=''):
         """
-        Align samples from multiple models based on common keys.
-        Sorts by audio_path for consistent ordering.
+        Align samples from multiple models into an audio-centric structure.
         
         Args:
-            *models: Model objects with samples_info attribute
-            missing_value: Value to use when a model doesn't have a specific key (default: None)
+            *models: Model objects with samples_info + overall_metrics
+            missing_value: Placeholder when a model has no prediction for a sample.
         
         Returns:
-            dict: {accuracy: [normalized_predictions_list]} where all lists have same length
+            dict: {audio_path: {score: transcript}}
             Also sets self.sorted_audio_paths for reference
         """
         if not models:
             return {}
-        
-        # Get all unique sample keys across all models
+
+        # Collect all audio keys
         all_keys = set()
         for model in models:
             if hasattr(model, 'samples_info') and model.samples_info:
-                print(len(model.samples_info))
                 all_keys.update(model.samples_info.keys())
-        
-        # Sort keys (audio_paths) alphabetically for consistent ordering
+
+        # Sort for consistency
         self.sorted_audio_paths = sorted(all_keys)
-        print(len(self.sorted_audio_paths))
+
+        # Build audio-centric dict
+        combined = {audio_path: {} for audio_path in self.sorted_audio_paths}
+
         for model in models:
-            accuracy = None
+            score = None
             if hasattr(model, 'overall_metrics') and model.overall_metrics:
-                accuracy = model.overall_metrics.get('average_score')
-            
-            if accuracy is None:
-                continue  # Skip models without accuracy
-            
-            # Align samples - extract raw_prediction only, sorted by audio_path
-            aligned_samples = []
+                score = model.overall_metrics.get('average_score')
+
+            if score is None:
+                continue  # Skip models with no score
+
             for audio_path in self.sorted_audio_paths:
                 if (hasattr(model, 'samples_info') and 
                     model.samples_info and 
                     audio_path in model.samples_info):
-                    sample = model.samples_info[audio_path].get('normalized_prediction', missing_value)
+                    transcript = model.samples_info[audio_path].get('normalized_prediction', missing_value)
                 else:
-                    sample = missing_value
-                
-                aligned_samples.append(sample)
-            
-            self._input_to_fusion[accuracy] = aligned_samples
+                    transcript = missing_value
 
+                combined[audio_path][score] = transcript
+
+        self._input_to_fusion = combined
+        
     @staticmethod
     def find_first_anchors(reference_sentence, compared_sentence):
         ref_words = reference_sentence.split()
@@ -1299,221 +1298,240 @@ class EnsembleInferenceRefactored:
         
         return voting_result
     
-    # def voting_scheme(self, alignment_results):
-    #     """
-    #     Implement majority voting scheme for operations and weighted voting for tokens.
+    def voting_scheme(self, alignment_results):
+        """
+        Implement majority voting scheme for operations and weighted voting for tokens.
         
-    #     Args:
-    #         alignment_results: List of dictionaries containing alignment data for each model
+        Args:
+            alignment_results: List of dictionaries containing alignment data for each model
             
-    #     Returns:
-    #         dict: Final voting result with operations, tokens, and metadata
-    #     """
+        Returns:
+            dict: Final voting result with operations, tokens, and metadata
+        """
         
-    #     def collect_position_votes(alignment_results, position):
-    #         """Collect all votes for a specific position"""
-    #         position_votes = {
-    #             'operations': [],
-    #             'tokens': [],
-    #             'weights': [],
-    #             'model_indices': [],
-    #             'is_reference_flags': []
-    #         }
+        def collect_position_votes(alignment_results, position):
+            """Collect all votes for a specific position"""
+            position_votes = {
+                'operations': [],
+                'tokens': [],
+                'weights': [],
+                'model_indices': [],
+                'is_reference_flags': []
+            }
             
-    #         for result in alignment_results:
-    #             position_votes['operations'].append(result['operations'][position])
-    #             position_votes['tokens'].append(result['tokens'][position])
-    #             position_votes['weights'].append(result['model_weight'])
-    #             position_votes['model_indices'].append(result['model_index'])
-    #             position_votes['is_reference_flags'].append(result['is_reference'])
+            for result in alignment_results:
+                position_votes['operations'].append(result['operations'][position])
+                position_votes['tokens'].append(result['tokens'][position])
+                position_votes['weights'].append(result['model_weight'])
+                position_votes['model_indices'].append(result['model_index'])
+                position_votes['is_reference_flags'].append(result['is_reference'])
             
-    #         return position_votes
+            return position_votes
         
-    #     def vote_for_operation(position_votes):
-    #         """Determine majority operation with tie-breaking"""
-    #         operation_counts = Counter(position_votes['operations'])
-    #         majority_operation = operation_counts.most_common(1)[0][0]
+        def vote_for_operation(position_votes):
+            """Determine majority operation with tie-breaking"""
+            operation_counts = Counter(position_votes['operations'])
+            majority_operation = operation_counts.most_common(1)[0][0]
             
-    #         # Handle ties with priority order
-    #         max_count = operation_counts.most_common(1)[0][1]
-    #         tied_operations = [op for op, count in operation_counts.items() if count == max_count]
-    #         if len(tied_operations) > 1:
-    #             priority_order = ["<KEEP>", "<REPLACE>", "<INSERT>", "<SKIP>", "<DELETE>"]
-    #             for preferred_op in priority_order:
-    #                 if preferred_op in tied_operations:
-    #                     majority_operation = preferred_op
-    #                     break
+            # Handle ties with priority order
+            max_count = operation_counts.most_common(1)[0][1]
+            tied_operations = [op for op, count in operation_counts.items() if count == max_count]
+            if len(tied_operations) > 1:
+                priority_order = ["<KEEP>", "<REPLACE>", "<INSERT>", "<SKIP>", "<DELETE>"]
+                for preferred_op in priority_order:
+                    if preferred_op in tied_operations:
+                        majority_operation = preferred_op
+                        break
             
-    #         return majority_operation, operation_counts
+            return majority_operation, operation_counts
         
-    #     def vote_for_token(position_votes, majority_operation):
-    #         """Determine final token based on operation and weights"""
-    #         final_token = None
+        def vote_for_token(position_votes, majority_operation):
+            """Determine final token based on operation and weights"""
+            final_token = None
             
-    #         if majority_operation == "<KEEP>":
-    #             # Find reference token or use first available
-    #             for i, is_ref in enumerate(position_votes['is_reference_flags']):
-    #                 if is_ref and position_votes['operations'][i] in ["<KEEP>", "<REPLACE>"]:
-    #                     final_token = position_votes['tokens'][i]
-    #                     break
+            if majority_operation == "<KEEP>":
+                # Find reference token or use first available
+                for i, is_ref in enumerate(position_votes['is_reference_flags']):
+                    if is_ref and position_votes['operations'][i] in ["<KEEP>", "<REPLACE>"]:
+                        final_token = position_votes['tokens'][i]
+                        break
                 
-    #             if final_token is None:
-    #                 final_token = position_votes['tokens'][0]
+                if final_token is None:
+                    final_token = position_votes['tokens'][0]
                     
-    #         elif majority_operation in ["<REPLACE>", "<INSERT>"]:
-    #             # Weighted voting among models that chose this operation
-    #             operation_tokens = {}
+            elif majority_operation in ["<REPLACE>", "<INSERT>"]:
+                # Weighted voting among models that chose this operation
+                operation_tokens = {}
                 
-    #             for i, op in enumerate(position_votes['operations']):
-    #                 if op == majority_operation and position_votes['tokens'][i] is not None:
-    #                     token = position_votes['tokens'][i]
-    #                     weight = position_votes['weights'][i]
-    #                     operation_tokens[token] = operation_tokens.get(token, 0) + weight
+                for i, op in enumerate(position_votes['operations']):
+                    if op == majority_operation and position_votes['tokens'][i] is not None:
+                        token = position_votes['tokens'][i]
+                        weight = position_votes['weights'][i]
+                        operation_tokens[token] = operation_tokens.get(token, 0) + weight
                 
-    #             if operation_tokens:
-    #                 final_token = max(operation_tokens.items(), key=lambda x: x[1])[0]
+                if operation_tokens:
+                    final_token = max(operation_tokens.items(), key=lambda x: x[1])[0]
                     
-    #         elif majority_operation in ["<DELETE>", "<SKIP>"]:
-    #             final_token = None
+            elif majority_operation in ["<DELETE>", "<SKIP>"]:
+                final_token = None
             
-    #         return final_token
+            return final_token
         
-    #     def create_voting_detail(position, operation_counts, majority_operation, final_token, position_votes):
-    #         """Create detailed voting information for a position"""
-    #         token_weights = {}
+        def create_voting_detail(position, operation_counts, majority_operation, final_token, position_votes):
+            """Create detailed voting information for a position"""
+            token_weights = {}
             
-    #         if majority_operation in ["<REPLACE>", "<INSERT>"]:
-    #             for token in set(position_votes['tokens']):
-    #                 if token is not None:
-    #                     token_weights[token] = sum(
-    #                         position_votes['weights'][i] 
-    #                         for i, t in enumerate(position_votes['tokens']) 
-    #                         if t == token and position_votes['operations'][i] == majority_operation
-    #                     )
+            if majority_operation in ["<REPLACE>", "<INSERT>"]:
+                for token in set(position_votes['tokens']):
+                    if token is not None:
+                        token_weights[token] = sum(
+                            position_votes['weights'][i] 
+                            for i, t in enumerate(position_votes['tokens']) 
+                            if t == token and position_votes['operations'][i] == majority_operation
+                        )
             
-    #         return {
-    #             'position': position,
-    #             'operation_votes': dict(operation_counts),
-    #             'majority_operation': majority_operation,
-    #             'final_token': final_token,
-    #             'models_voted': len(position_votes['operations']),
-    #             'token_weights': token_weights
-    #         }
+            return {
+                'position': position,
+                'operation_votes': dict(operation_counts),
+                'majority_operation': majority_operation,
+                'final_token': final_token,
+                'models_voted': len(position_votes['operations']),
+                'token_weights': token_weights
+            }
         
-    #     def construct_final_transcription(final_operations, final_tokens):
-    #         """Build the final transcription from operations and tokens"""
-    #         final_transcription_words = []
+        def construct_final_transcription(final_operations, final_tokens):
+            """Build the final transcription from operations and tokens"""
+            final_transcription_words = []
             
-    #         for operation, token in zip(final_operations, final_tokens):
-    #             if operation in ["<KEEP>", "<REPLACE>", "<INSERT>"] and token is not None:
-    #                 final_transcription_words.append(token)
+            for operation, token in zip(final_operations, final_tokens):
+                if operation in ["<KEEP>", "<REPLACE>", "<INSERT>"] and token is not None:
+                    final_transcription_words.append(token)
             
-    #         return " ".join(final_transcription_words)
+            return " ".join(final_transcription_words)
         
-    #     def calculate_confidence_score(alignment_results, operations_length):
-    #         """Calculate overall confidence based on operation agreement"""
-    #         total_positions = operations_length
-    #         operation_confidence = sum(
-    #             max(Counter([result['operations'][i] for result in alignment_results]).values()) / len(alignment_results)
-    #             for i in range(total_positions)
-    #         ) / total_positions if total_positions > 0 else 0
+        def calculate_confidence_score(alignment_results, operations_length):
+            """Calculate overall confidence based on operation agreement"""
+            total_positions = operations_length
+            operation_confidence = sum(
+                max(Counter([result['operations'][i] for result in alignment_results]).values()) / len(alignment_results)
+                for i in range(total_positions)
+            ) / total_positions if total_positions > 0 else 0
             
-    #         return operation_confidence
+            return operation_confidence
         
-    #     def create_metadata(alignment_results, final_operations):
-    #         """Create metadata about the voting results"""
-    #         return {
-    #             'reference_type': alignment_results[0].get('reference_type', 'unknown'),
-    #             'total_keep': final_operations.count('<KEEP>'),
-    #             'total_replace': final_operations.count('<REPLACE>'),
-    #             'total_insert': final_operations.count('<INSERT>'),
-    #             'total_delete': final_operations.count('<DELETE>'),
-    #             'total_skip': final_operations.count('<SKIP>')
-    #         }
+        def create_metadata(alignment_results, final_operations):
+            """Create metadata about the voting results"""
+            return {
+                'reference_type': alignment_results[0].get('reference_type', 'unknown'),
+                'total_keep': final_operations.count('<KEEP>'),
+                'total_replace': final_operations.count('<REPLACE>'),
+                'total_insert': final_operations.count('<INSERT>'),
+                'total_delete': final_operations.count('<DELETE>'),
+                'total_skip': final_operations.count('<SKIP>')
+            }
         
-    #     if not alignment_results or len(alignment_results) == 0:
-    #         voting_result = {
-    #             'final_transcription': '',
-    #             'final_operations': [],
-    #             'final_tokens': [],
-    #             'voting_details': {},
-    #             'confidence_score': 0,
-    #             'total_models': 0,
-    #             'operations_length': 0,
-    #             'metadata': {}
-    #         }
-    #         return voting_result
+        if not alignment_results or len(alignment_results) == 0:
+            voting_result = {
+                'final_transcription': '',
+                'final_operations': [],
+                'final_tokens': [],
+                'voting_details': {},
+                'confidence_score': 0,
+                'total_models': 0,
+                'operations_length': 0,
+                'metadata': {}
+            }
+            return voting_result
         
-    #     # Main voting logic
-    #     operations_length = len(alignment_results[0]['operations'])
-    #     final_operations = []
-    #     final_tokens = []
-    #     voting_details = []
+        # Main voting logic
+        operations_length = len(alignment_results[0]['operations'])
+        final_operations = []
+        final_tokens = []
+        voting_details = []
         
-    #     # Process each position
-    #     for position in range(operations_length):
-    #         position_votes = collect_position_votes(alignment_results, position)
-    #         majority_operation, operation_counts = vote_for_operation(position_votes)
-    #         final_token = vote_for_token(position_votes, majority_operation)
+        # Process each position
+        for position in range(operations_length):
+            position_votes = collect_position_votes(alignment_results, position)
+            majority_operation, operation_counts = vote_for_operation(position_votes)
+            final_token = vote_for_token(position_votes, majority_operation)
             
-    #         final_operations.append(majority_operation)
-    #         final_tokens.append(final_token)
+            final_operations.append(majority_operation)
+            final_tokens.append(final_token)
             
-    #         voting_detail = create_voting_detail(position, operation_counts, majority_operation, final_token, position_votes)
-    #         voting_details.append(voting_detail)
+            voting_detail = create_voting_detail(position, operation_counts, majority_operation, final_token, position_votes)
+            voting_details.append(voting_detail)
         
-    #     # Construct final results
-    #     final_transcription = construct_final_transcription(final_operations, final_tokens)
-    #     confidence_score = calculate_confidence_score(alignment_results, operations_length)
-    #     metadata = create_metadata(alignment_results, final_operations)
+        # Construct final results
+        final_transcription = construct_final_transcription(final_operations, final_tokens)
+        confidence_score = calculate_confidence_score(alignment_results, operations_length)
+        metadata = create_metadata(alignment_results, final_operations)
         
-    #     voting_result = {
-    #         'final_transcription': final_transcription,
-    #         'final_operations': final_operations,
-    #         'final_tokens': final_tokens,
-    #         'voting_details': voting_details,
-    #         'confidence_score': confidence_score,
-    #         'total_models': len(alignment_results),
-    #         'operations_length': operations_length,
-    #         'metadata': metadata
-    #     }
+        voting_result = {
+            'final_transcription': final_transcription,
+            'final_operations': final_operations,
+            'final_tokens': final_tokens,
+            'voting_details': voting_details,
+            'confidence_score': confidence_score,
+            'total_models': len(alignment_results),
+            'operations_length': operations_length,
+            'metadata': metadata
+        }
         
-    #     return voting_result
+        return voting_result
 
     def fusion(self):
         def fuse_sample_transcriptions(weights, transcriptions):
-            reference_type, reference, reference_index = self.get_reference_from_transcriptions(transcriptions) # Handle the case where reference and index are None
-            # print(f"Reference: {reference}, type: {reference_type}, index: {reference_index}")
-
+            reference_type, reference, reference_index = self.get_reference_from_transcriptions(transcriptions)
             alignment_results = self.align_transcriptions_to_reference(weights=weights, reference=reference, reference_type=reference_type, reference_index=reference_index, transcriptions=transcriptions)
             candidates_tokens = [element['tokens'] for element in alignment_results]
             voting_result = self.unweighted_voting_scheme(alignment_results)
             voting_result["candidates_tokens"] = candidates_tokens
-            print(voting_result['final_tokens'], voting_result['candidates_tokens'])
             return voting_result
 
         if not self.input_to_fusion:
             raise ValueError("Run EnsembleInference.align_model_records first.")
-         
-        sorted_items = sorted(self.input_to_fusion.items(), key=lambda x: x[0], reverse=True)
-        accuracies = [a for a, _ in sorted_items]
-        transcriptions_lists = [transcriptions for _, transcriptions in sorted_items]
-        weights = self.compute_weights(accuracies)
-        for _, transcriptions_group in enumerate(zip(*transcriptions_lists)):
-            # print(f"Processing index {i}")
-            # print(transcriptions_group)
-            voting_result = fuse_sample_transcriptions(weights, transcriptions_group)
+        
+        for key, value in self.input_to_fusion.items():
+            audio_path = key
+            accuracies = []
+            transcriptions_lists = []
+            for score, transcript in value.items():
+                accuracies.append(score)
+                transcriptions_lists.append(transcript)
+
+            weights = self.compute_weights(accuracies)
+            voting_result = fuse_sample_transcriptions(weights, transcriptions_lists)
+            voting_result['audio_path'] = audio_path
             self._fusion_results.append(voting_result)
+            self._fusion_results = sorted(self._fusion_results, key=lambda x: x["audio_path"])
+        
+        # sorted_items = sorted(self.input_to_fusion.items(), key=lambda x: x[0], reverse=True)
+        # accuracies = [a for a, _ in sorted_items]
+        # transcriptions_lists = [transcriptions for _, transcriptions in sorted_items]
+        # weights = self.compute_weights(accuracies)
+        # for _, transcriptions_group in enumerate(zip(*transcriptions_lists)):
+        #     # print(f"Processing index {i}")
+        #     # print(transcriptions_group)
+        #     voting_result = fuse_sample_transcriptions(weights, transcriptions_group)
+        #     self._fusion_results.append(voting_result)
 
             # print('--------------------------------------------')
     
+    def reorder_samples_info(self, records):
+        ordered_info = OrderedDict()
+        for record in records:
+            audio_path = record["audio_path"]
+            if audio_path in self._samples_info:
+                ordered_info[audio_path] = self._samples_info[audio_path]
+        self._samples_info = ordered_info
+
     def _process_fusion_results(self):
         final_transcripts = [result['final_transcription'] for result in self._fusion_results]
-        self._processed_results = ArabicTextProcessor.process_texts(final_transcripts)
+        self._normalized_hypths = text_processing.StandardArabicTextProcessor.normalize_texts(final_transcripts)
     
-    def evaluate(self, processed_transcriptions):
+    def evaluate(self, normalized_transcriptions):
         self._process_fusion_results()
-        self._overall_metrics = metrics.FilteredS2TMetrics.evaluate(refs=processed_transcriptions, hyps=self._processed_results)
+        self._overall_metrics = metrics.StandardSTTMetrics.evaluate(refs=normalized_transcriptions, hyps=self._normalized_hypths)
 
     def summary_of_evaluation(self):
         if not hasattr(self, 'overall_metrics') or not self._overall_metrics:

@@ -6,7 +6,7 @@ from collections import OrderedDict
 
 from tqdm import tqdm
 
-from . import LOGGER
+from .. import LOGGER
 from stt_benchmarking.utils import (
     text_processing,
     helpers, 
@@ -59,7 +59,6 @@ class RDI_STT_Inference:
         all_refs_normalized = []
         all_hyps = [] = []
         all_audio_paths = []
-
         if not isinstance(records, list):
             records = [records]
 
@@ -73,11 +72,24 @@ class RDI_STT_Inference:
                 all_audio_paths.append(audio_path)
         
         all_hyps_normalized = text_processing.StandardArabicTextProcessor.normalize_texts(all_hyps)
+        self._finalize_info(all_audio_paths=all_audio_paths, all_refs_normalized=all_refs_normalized, all_hyps_normalized=all_hyps_normalized)
+        self.reorder_samples_info(records=records)
+        self._overall_metrics = metrics.StandardSTTMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
+
+    def _finalize_info(self, all_audio_paths, all_refs_normalized, all_hyps_normalized):
+        """
+        Finalize predictions by normalizing them and computing metrics for each sample.
+
+        Args:
+            all_audio_paths (list): List of audio file paths.
+            all_refs_normalized (list): List of normalized reference texts.
+            all_hyps_normalized (list): List of normalized hypothesis texts.
+        """
         for i, audio_path in enumerate(all_audio_paths):
             if audio_path in self._samples_info:
                 try:
                     self._samples_info[audio_path]["normalized_prediction"] = all_hyps_normalized[i]
-                    sample_metrics = metrics.FilteredS2TMetrics.evaluate(
+                    sample_metrics = metrics.StandardSTTMetrics.evaluate(
                         refs=all_refs_normalized[i],
                         hyps=all_hyps_normalized[i],
                         single_sample=True
@@ -85,12 +97,12 @@ class RDI_STT_Inference:
                     self._samples_info[audio_path]["metrics"] = sample_metrics
                 except Exception as e:
                     LOGGER.error(f"Error processing sample {i+1}, Name: {audio_path}, failed: {e}")
-                    LOGGER.info(f"{self._samples_info[audio_path]}")
-                    self._samples_info[audio_path]['metrics'] = {"word_accuracy": None, "char_accuracy": None, "average_score": None}
+                    self._samples_info[audio_path]["metrics"] = {
+                        "word_accuracy": None,
+                        "char_accuracy": None,
+                        "average_score": None,
+                    }
                     continue
-        
-        self.reorder_samples_info(records=records)
-        self._overall_metrics = metrics.FilteredS2TMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
 
     def reorder_samples_info(self, records):
         ordered_info = OrderedDict()

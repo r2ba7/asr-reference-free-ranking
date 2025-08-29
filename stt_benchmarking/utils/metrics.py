@@ -116,7 +116,7 @@ class StandardSTTMetrics:
         zero_accuracy_count = 0
         
         for ref, hyp in zip(refs, hyps):
-            word_acc, _ = StandardSTTMetrics.compute_wer_accuracy(ref, hyp)
+            word_acc = StandardSTTMetrics.compute_wer_accuracy(ref, hyp)
             char_acc = StandardSTTMetrics.compute_cer_accuracy(ref, hyp)
             
             word_accuracies.append(word_acc)

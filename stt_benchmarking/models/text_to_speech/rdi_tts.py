@@ -10,7 +10,7 @@ from scipy import signal
 from tqdm import tqdm
 import numpy as np
 
-from . import LOGGER
+from .. import LOGGER
 from stt_benchmarking.utils import (
     decorators, 
 )

@@ -2,7 +2,7 @@ import torch
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
 from tqdm import tqdm
 
-from . import LOGGER
+from .. import LOGGER
 from stt_benchmarking.utils import (
     helpers, 
     decorators, 

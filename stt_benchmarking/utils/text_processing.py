@@ -354,6 +354,25 @@ class StandardArabicTextProcessor:
     ENGLISH_LETTERS = re.compile(r'[a-zA-Z]')
 
     @staticmethod
+    def convert_numbers_to_arabic_text(texts: List[str]) -> List[str]:
+        """
+        Convert numeric values in texts to Arabic words.
+        """
+        def convert_single_text(text: str) -> str:
+            words = text.split()
+            converted_words = []
+            for word in words:
+                if word.isdigit():
+                    try:
+                        converted_words.append(num2words(int(word), lang="ar"))
+                    except Exception:
+                        converted_words.append(word)
+                else:
+                    converted_words.append(word)
+            return " ".join(converted_words)
+        return [convert_single_text(text) for text in texts]
+
+    @staticmethod
     def remove_symbols_and_english_letters(texts: List[str]) -> List[str]:
         """
         Remove all symbols and English letters while keeping Arabic text and numbers.
@@ -487,7 +506,7 @@ class StandardArabicTextProcessor:
 
         # Step 4: Transliterate Arabic digits to Western numerals
         processed_texts = StandardArabicTextProcessor.transliterate_digits(processed_texts)
-
+        processed_texts = StandardArabicTextProcessor.convert_numbers_to_arabic_text(processed_texts)
         # Step 5: Normalize Hamzas and Maddas
         processed_texts = StandardArabicTextProcessor.normalize_hamzas_and_maddas(processed_texts)
 

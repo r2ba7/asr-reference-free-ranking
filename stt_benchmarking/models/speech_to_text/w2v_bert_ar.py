@@ -1,24 +1,25 @@
-import nemo.collections.asr as nemo_asr
+import torch
+from transformers import AutoProcessor, AutoModelForCTC
 from tqdm import tqdm
-import gc
 
-from . import LOGGER
+from .. import LOGGER
 from stt_benchmarking.utils import (
     text_processing, 
     decorators, 
-    metrics,
-    validate
+    metrics
 )
 
-class Fastconformer_hybridInference:
-    def __init__(self):
+class w2vBERTInference:
+    def __init__(self, device):
         """
         Initialize the HubertArabicInference class.
 
         Args:
             device (str or torch.device): Device to run the model on ('cuda' or 'cpu')
         """
-        self.model = self._load_model()
+        self.device = device if isinstance(device, torch.device) else torch.device(device)
+        self.model, self.processor = self._load_model()
+        self.dtype = self.model.dtype
         self._overall_metrics = None
         self._samples_info = {}
 
@@ -29,10 +30,17 @@ class Fastconformer_hybridInference:
         Returns:
             tuple: (model, processor)
         """
-        model = nemo_asr.models.EncDecHybridRNNTCTCBPEModel.from_pretrained(model_name="nvidia/stt_ar_fastconformer_hybrid_large_pcd_v1.0")
-        LOGGER.info(f"Loaded model stt conformer hybrid")
-        return model
-    
+        MODEL_ID = "whitefox123/w2v-bert-2.0-arabic-4"
+        processor = AutoProcessor.from_pretrained(MODEL_ID)
+        model = AutoModelForCTC.from_pretrained(
+            MODEL_ID,
+            torch_dtype=torch.float16 if self.device.type == "cuda" else torch.float32
+        ).to(self.device)
+
+        model.eval()
+        LOGGER.info(f"Loaded model w2v Bert Arabic")
+        return model, processor
+
     @decorators.Decorators.calculate_execution_time
     def run_inference_one_by_one(self, records):
         """
@@ -49,83 +57,86 @@ class Fastconformer_hybridInference:
             records = [records]
             
         for i, record in tqdm(enumerate(records), total=len(records), desc="Processing Records"):
+            waveform = record["waveform"]
             audio_path = record['audio_path']
             transcription = record['transcription']
             normalized_transcription = record['normalized_transcription']
             all_audio_paths.append(audio_path)
             try:
-                output = self.model.transcribe([audio_path])
-                raw_prediction = output[0].text
-                validated_raw_prediction = validate.ValidateText.validate_text_in_ar(raw_prediction)
+                inputs = self.processor(
+                    audio=waveform,
+                    sampling_rate=record['sample_rate'],
+                    return_tensors="pt",
+                ).to(self.device, dtype=self.dtype)
+                input_features = inputs["input_features"].to(self.device, dtype=self.dtype)
+                with torch.no_grad():
+                    logits = self.model(input_features).logits
+
+                predicted_ids = torch.argmax(logits, dim=-1)
+                raw_prediction = self.processor.decode(predicted_ids[0])
 
             except Exception as e:
-                LOGGER.error(f"Sample {i+1}, Name: {audio_path}, failed: {e}")
+                LOGGER.error(f"⚠️ Sample {i+1}, Name: {record['audio_path']}, failed: {e}")
                 continue
 
             all_refs_normalized.append(normalized_transcription)
-            all_hyps.append(validated_raw_prediction)
+            all_hyps.append(raw_prediction)
             self._samples_info[audio_path] = {
                 "raw_transcription": transcription,
                 "normalized_transcription": normalized_transcription,
-                "raw_prediction": validated_raw_prediction,
+                "raw_prediction": raw_prediction,
                 "normalized_prediction": None,
             }
 
         all_hyps_normalized = text_processing.StandardArabicTextProcessor.normalize_texts(all_hyps)
+        self._finalize_info(all_audio_paths=all_audio_paths, all_refs_normalized=all_refs_normalized, all_hyps_normalized=all_hyps_normalized)
+        self._overall_metrics = metrics.StandardSTTMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
+
+    def _finalize_info(self, all_audio_paths, all_refs_normalized, all_hyps_normalized):
+        """
+        Finalize predictions by normalizing them and computing metrics for each sample.
+
+        Args:
+            all_audio_paths (list): List of audio file paths.
+            all_refs_normalized (list): List of normalized reference texts.
+            all_hyps_normalized (list): List of normalized hypothesis texts.
+        """
         for i, audio_path in enumerate(all_audio_paths):
             if audio_path in self._samples_info:
                 try:
                     self._samples_info[audio_path]["normalized_prediction"] = all_hyps_normalized[i]
-                    sample_metrics = metrics.FilteredS2TMetrics.evaluate(
+                    sample_metrics = metrics.StandardSTTMetrics.evaluate(
                         refs=all_refs_normalized[i],
                         hyps=all_hyps_normalized[i],
                         single_sample=True
                     )
                     self._samples_info[audio_path]["metrics"] = sample_metrics
-
                 except Exception as e:
                     LOGGER.error(f"Error processing sample {i+1}, Name: {audio_path}, failed: {e}")
-                    LOGGER.info(f"{self._samples_info[audio_path]}")
-                    self._samples_info[audio_path]['metrics'] = {"word_accuracy": None, "char_accuracy": None, "average_score": None}
+                    self._samples_info[audio_path]["metrics"] = {
+                        "word_accuracy": None,
+                        "char_accuracy": None,
+                        "average_score": None,
+                    }
                     continue
-
-        self._overall_metrics = metrics.FilteredS2TMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
-
+        
     def summary_of_evaluation(self):
         """
         Display a simple summary of the overall evaluation metrics.
         """
-        if not hasattr(self, '_overall_metrics') or not self._overall_metrics:
+        if not hasattr(self, 'overall_metrics') or not self._overall_metrics:
             LOGGER.warning("No evaluation metrics available. Run inference first.")
             return
         
         LOGGER.info("Overall Evaluation Summary:")
         for k, v in self._overall_metrics.items():
             LOGGER.info(f"{k}: {v}")
-
-    def reset(self):
-        """
-        Reset the inference results and metrics without reinitializing the model.
-        This clears all stored results from previous inference runs while keeping
-        the loaded model intact.
-        """
-        self._overall_metrics = None
-        self._samples_info = {}
         
-        # Optional: Clear GPU cache if CUDA is available
-        import torch
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
-            torch.cuda.reset_peak_memory_stats()
-    
-        LOGGER.info("Fastconformer_hybridInference instance has been reset. Model remains loaded.")
+    @property
+    def overall_metrics(self):
+        return self._overall_metrics
 
     @property
     def samples_info(self):
         return self._samples_info
-    
-    @property
-    def overall_metrics(self):
-        return self._overall_metrics
+

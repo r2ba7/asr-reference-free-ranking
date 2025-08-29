@@ -63,7 +63,7 @@ def clean_arabic_text(text):
     return text
 
 # Updated scraping code with text cleaning
-def scrape_newspapers_with_cleaning(no_articles):
+def scrape_newspapers_with_cleaning(no_articles_per_paper, words_per_article):
     news_sources = {
         "Egypt": {
             "AlAhram": "https://www.ahram.org.eg",
@@ -80,7 +80,7 @@ def scrape_newspapers_with_cleaning(no_articles):
         for paper, url in papers.items():
             print(f"Scraping {paper}...")
             paper_obj = newspaper.build(url, memoize_articles=False, language='ar')
-            for content in paper_obj.articles[:no_articles]:
+            for content in paper_obj.articles[:no_articles_per_paper]:
                 try:
                     content.download()
                     content.parse()
@@ -100,11 +100,10 @@ def scrape_newspapers_with_cleaning(no_articles):
                     word_count = len(words)
 
                     # If longer than 100, take only first 100 words
-                    if word_count > 100:
-                        words = words[:100]
+                    if word_count > words_per_article:
+                        words = words[:words_per_article]
                         cleaned_text = " ".join(words)
-                        word_count = 100
-                        print(f"Truncated {paper} article to 100 words")
+                        word_count = words_per_article
 
                     articles_data.append({
                         "country": country,

@@ -3,11 +3,14 @@ from collections import defaultdict
 from itertools import islice
 from collections import Counter, OrderedDict
 import random
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
+from tqdm import tqdm
 
 from stt_benchmarking.utils import text_processing
 from stt_benchmarking.utils import metrics
+from stt_benchmarking.models.llms.openrouter_api import get_response
 from .. import LOGGER
 
 class EnsembleInference:
@@ -757,7 +760,8 @@ class EnsembleInferenceOld:
         return aligned_results
 
 class EnsembleInferenceRefactored:
-    def __init__(self):
+    def __init__(self, llm_validation):
+        self.llm_validation = llm_validation
         self._input_to_fusion = {}
         self._fusion_results = []
         self._processed_results = []
@@ -1218,11 +1222,11 @@ class EnsembleInferenceRefactored:
                 'token_weights': token_weights  # Now shows counts instead of weights
             }
         
-        def construct_final_transcription(final_operations, final_tokens):
+        def construct_final_transcription(fusion_operations, fusion_tokens):
             """Build the final transcription from operations and tokens"""
             final_transcription_words = []
             
-            for operation, token in zip(final_operations, final_tokens):
+            for operation, token in zip(fusion_operations, fusion_tokens):
                 if operation in ["<KEEP>", "<REPLACE>", "<INSERT>"] and token is not None:
                     final_transcription_words.append(token)
             
@@ -1238,15 +1242,15 @@ class EnsembleInferenceRefactored:
             
             return operation_confidence
         
-        def create_metadata(alignment_results, final_operations):
+        def create_metadata(alignment_results, fusion_operations):
             """Create metadata about the voting results"""
             return {
                 'reference_type': alignment_results[0].get('reference_type', 'unknown'),
-                'total_keep': final_operations.count('<KEEP>'),
-                'total_replace': final_operations.count('<REPLACE>'),
-                'total_insert': final_operations.count('<INSERT>'),
-                'total_delete': final_operations.count('<DELETE>'),
-                'total_skip': final_operations.count('<SKIP>')
+                'total_keep': fusion_operations.count('<KEEP>'),
+                'total_replace': fusion_operations.count('<REPLACE>'),
+                'total_insert': fusion_operations.count('<INSERT>'),
+                'total_delete': fusion_operations.count('<DELETE>'),
+                'total_skip': fusion_operations.count('<SKIP>')
             }
         
         if not alignment_results or len(alignment_results) == 0:
@@ -1264,8 +1268,8 @@ class EnsembleInferenceRefactored:
         
         # Main voting logic
         operations_length = len(alignment_results[0]['operations'])
-        final_operations = []
-        final_tokens = []
+        fusion_operations = []
+        fusion_tokens = []
         voting_details = []
         
         # Process each position
@@ -1274,21 +1278,20 @@ class EnsembleInferenceRefactored:
             majority_operation, operation_counts = vote_for_operation(position_votes)
             final_token = vote_for_token(position_votes, majority_operation)
             
-            final_operations.append(majority_operation)
-            final_tokens.append(final_token)
+            fusion_operations.append(majority_operation)
+            fusion_tokens.append(final_token)
             
             voting_detail = create_voting_detail(position, operation_counts, majority_operation, final_token, position_votes)
             voting_details.append(voting_detail)
         
         # Construct final results
-        final_transcription = construct_final_transcription(final_operations, final_tokens)
+        fusion_transcript = construct_final_transcription(fusion_operations, fusion_tokens)
         confidence_score = calculate_confidence_score(alignment_results, operations_length)
-        metadata = create_metadata(alignment_results, final_operations)
-        
+        metadata = create_metadata(alignment_results, fusion_operations)
         voting_result = {
-            'final_transcription': final_transcription,
-            'final_operations': final_operations,
-            'final_tokens': final_tokens,
+            'fusion_transcript': fusion_transcript,
+            'fusion_operations': fusion_operations,
+            'fusion_tokens': fusion_tokens,
             'voting_details': voting_details,
             'confidence_score': confidence_score,
             'total_models': len(alignment_results),
@@ -1479,19 +1482,33 @@ class EnsembleInferenceRefactored:
         
         return voting_result
 
-    def fusion(self):
+    def fusion(self, ):
         def fuse_sample_transcriptions(weights, transcriptions):
             reference_type, reference, reference_index = self.get_reference_from_transcriptions(transcriptions)
-            alignment_results = self.align_transcriptions_to_reference(weights=weights, reference=reference, reference_type=reference_type, reference_index=reference_index, transcriptions=transcriptions)
+            alignment_results = self.align_transcriptions_to_reference(
+                weights=weights,
+                reference=reference,
+                reference_type=reference_type,
+                reference_index=reference_index,
+                transcriptions=transcriptions
+            )
             candidates_tokens = [element['tokens'] for element in alignment_results]
             voting_result = self.unweighted_voting_scheme(alignment_results)
             voting_result["candidates_tokens"] = candidates_tokens
+            if self.llm_validation:
+                voting_result["llm_validation"] = get_response(
+                    candidate_tokens=voting_result["candidates_tokens"],
+                    fusion_tokens=voting_result["fusion_tokens"]
+                )
             return voting_result
 
         if not self.input_to_fusion:
             raise ValueError("Run EnsembleInference.align_model_records first.")
-        
-        for key, value in self.input_to_fusion.items():
+
+        results = []
+
+        def process_item(item):
+            key, value = item
             audio_path = key
             accuracies = []
             transcriptions_lists = []
@@ -1502,45 +1519,58 @@ class EnsembleInferenceRefactored:
             weights = self.compute_weights(accuracies)
             voting_result = fuse_sample_transcriptions(weights, transcriptions_lists)
             voting_result['audio_path'] = audio_path
-            self._fusion_results.append(voting_result)
-            self._fusion_results = sorted(self._fusion_results, key=lambda x: x["audio_path"])
-        
-        # sorted_items = sorted(self.input_to_fusion.items(), key=lambda x: x[0], reverse=True)
-        # accuracies = [a for a, _ in sorted_items]
-        # transcriptions_lists = [transcriptions for _, transcriptions in sorted_items]
-        # weights = self.compute_weights(accuracies)
-        # for _, transcriptions_group in enumerate(zip(*transcriptions_lists)):
-        #     # print(f"Processing index {i}")
-        #     # print(transcriptions_group)
-        #     voting_result = fuse_sample_transcriptions(weights, transcriptions_group)
-        #     self._fusion_results.append(voting_result)
+            return voting_result
 
-            # print('--------------------------------------------')
-    
-    def reorder_samples_info(self, records):
-        ordered_info = OrderedDict()
-        for record in records:
-            audio_path = record["audio_path"]
-            if audio_path in self._samples_info:
-                ordered_info[audio_path] = self._samples_info[audio_path]
-        self._samples_info = ordered_info
+        with ThreadPoolExecutor(max_workers=8) as executor:  # adjust workers to CPU/GPU availability
+            futures = {executor.submit(process_item, item): item for item in self.input_to_fusion.items()}
+
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Fusing Inputs..."):
+                result = future.result()
+                results.append(result)
+
+        self._fusion_results = sorted(results, key=lambda x: x["audio_path"])
 
     def _process_fusion_results(self):
-        final_transcripts = [result['final_transcription'] for result in self._fusion_results]
-        self._normalized_hypths = text_processing.StandardArabicTextProcessor.normalize_texts(final_transcripts)
+        if self.llm_validation:
+            llms_validated_transcripts = [
+                " ".join(result["llm_validation"].adjusted_fusion_tokens)
+                for result in self._fusion_results
+            ]
+            self._llms_normalized_hypths = text_processing.StandardArabicTextProcessor.normalize_texts(llms_validated_transcripts)
+        else:
+            fusion_transcripts = [result['fusion_transcript'] for result in self._fusion_results]
+            self._normalized_hypths = text_processing.StandardArabicTextProcessor.normalize_texts(fusion_transcripts)
+
     
     def evaluate(self, normalized_transcriptions):
         self._process_fusion_results()
-        self._overall_metrics = metrics.StandardSTTMetrics.evaluate(refs=normalized_transcriptions, hyps=self._normalized_hypths)
+        if self.llm_validation:
+            self._overall_metrics_llms = metrics.StandardSTTMetrics.evaluate(refs=normalized_transcriptions, hyps=self._llms_normalized_hypths)
+        else:
+            self._overall_metrics = metrics.StandardSTTMetrics.evaluate(refs=normalized_transcriptions, hyps=self._normalized_hypths)
 
     def summary_of_evaluation(self):
-        if not hasattr(self, 'overall_metrics') or not self._overall_metrics:
-            LOGGER.warning("No evaluation metrics available. Run EnsembleInferenceRefactored.evaluate first.")
-            return
+
         
-        LOGGER.info("Overall Evaluation Summary:")
-        for k, v in self._overall_metrics.items():
-            LOGGER.info(f"{k}: {v}")
+        if self.llm_validation:
+            if not hasattr(self, '_overall_metrics_llms') or not self._overall_metrics_llms:
+                LOGGER.warning("No evaluation metrics available. Run EnsembleInferenceRefactored.evaluate first.")
+                return
+            
+            LOGGER.info("LLMS Overall Evaluation Summary:")
+            for k, v in self._overall_metrics_llms.items():
+                LOGGER.info(f"{k}: {v}")
+        
+        else:
+            if not hasattr(self, '_overall_metrics') or not self._overall_metrics:
+                LOGGER.warning("No evaluation metrics available. Run EnsembleInferenceRefactored.evaluate first.")
+                return
+            
+            LOGGER.info("Overall Evaluation Summary:")
+            for k, v in self._overall_metrics.items():
+                LOGGER.info(f"{k}: {v}")
+
+
 
     def reset(self):
         """

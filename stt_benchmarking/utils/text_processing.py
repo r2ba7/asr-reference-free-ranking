@@ -32,7 +32,7 @@ WORDS_TO_BE_REMOVED = [
     'و'
 ]
 
-class ArabicTextProcessor:
+class HeavyArabicTextProcessing:
     """
     A comprehensive Arabic text processor that handles cleaning, normalization,
     and custom text replacements for Arabic text processing tasks.
@@ -252,8 +252,8 @@ class ArabicTextProcessor:
         Returns:
             List[str]: List of normalized and cleaned texts in the same order
         """
-        replaced_texts = ArabicTextProcessor.substitute_words(texts)        
-        cleaned_texts = ArabicTextProcessor.process_arabic_text_arabert(replaced_texts)
+        replaced_texts = HeavyArabicTextProcessing.substitute_words(texts)        
+        cleaned_texts = HeavyArabicTextProcessing.process_arabic_text_arabert(replaced_texts)
         return cleaned_texts
     
     @staticmethod
@@ -279,23 +279,23 @@ class ArabicTextProcessor:
             raise TypeError("Input must be either a string or a list of strings")
         
         # Step 0: Remove punctuation from all texts
-        processed_texts = ArabicTextProcessor.remove_punctuation(texts)
-        
+        processed_texts = HeavyArabicTextProcessing.remove_punctuation(texts)
+        processed_texts = HeavyArabicTextProcessing.convert_numbers_to_arabic_text(processed_texts)
         # Step 1: Normalize texts (includes substitution and basic cleaning)
-        processed_texts = ArabicTextProcessor.substitute_and_arabert(processed_texts)
+        processed_texts = HeavyArabicTextProcessing.substitute_and_arabert(processed_texts)
         
         # Step 2: Apply word-level mappings (like يئول -> يقول)
-        processed_texts = ArabicTextProcessor.apply_word_mappings(processed_texts)
+        processed_texts = HeavyArabicTextProcessing.apply_word_mappings(processed_texts)
         
         # Step 3: Apply character-level mappings (like أ -> ا)
-        processed_texts = ArabicTextProcessor.apply_character_mappings(processed_texts)
+        processed_texts = HeavyArabicTextProcessing.apply_character_mappings(processed_texts)
         
         # Step 4: Normalize final letters if requested
         if normalize_final_letters:
-            processed_texts = ArabicTextProcessor.normalize_final_letters(processed_texts)
+            processed_texts = HeavyArabicTextProcessing.normalize_final_letters(processed_texts)
         
         # Step 5: Remove unwanted words (like standalone ال)
-        processed_texts = ArabicTextProcessor.remove_unwanted_words(processed_texts)
+        processed_texts = HeavyArabicTextProcessing.remove_unwanted_words(processed_texts)
         
         # Step 6: Clean up any extra whitespace
         processed_texts = [' '.join(text.split()) for text in processed_texts]
@@ -313,13 +313,13 @@ class ArabicTextProcessor:
         else:
             raise TypeError("Input must be either a string or a list of strings")
         
-        processed_texts = ArabicTextProcessor.remove_punctuation(texts)
-        processed_texts = ArabicTextProcessor.remove_tashkeel_tatweel(processed_texts)
-        processed_texts = ArabicTextProcessor.convert_numbers_to_arabic_text(processed_texts)
-        replaced_texts = ArabicTextProcessor.substitute_words(processed_texts)
-        processed_texts = ArabicTextProcessor.apply_word_mappings(replaced_texts)
-        processed_texts = ArabicTextProcessor.apply_character_mappings(processed_texts)
-        processed_texts = ArabicTextProcessor.normalize_final_letters(processed_texts)
+        processed_texts = HeavyArabicTextProcessing.remove_punctuation(texts)
+        processed_texts = HeavyArabicTextProcessing.remove_tashkeel_tatweel(processed_texts)
+        processed_texts = HeavyArabicTextProcessing.convert_numbers_to_arabic_text(processed_texts)
+        replaced_texts = HeavyArabicTextProcessing.substitute_words(processed_texts)
+        processed_texts = HeavyArabicTextProcessing.apply_word_mappings(replaced_texts)
+        processed_texts = HeavyArabicTextProcessing.apply_character_mappings(processed_texts)
+        processed_texts = HeavyArabicTextProcessing.normalize_final_letters(processed_texts)
         processed_texts = [' '.join(text.split()) for text in processed_texts]
         return processed_texts[0] if is_single_input else processed_texts
     

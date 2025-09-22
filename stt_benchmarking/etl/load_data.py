@@ -7,7 +7,7 @@ from stt_benchmarking.utils import text_processing
 import os
 import torchaudio
 
-def load_audio_transcripts(data_dir, sep, metadata_file_name="metadata.txt"):
+def load_audio_transcripts(data_dir, sep, heavy_process=False, metadata_file_name="metadata.txt"):
     if not os.path.isdir(data_dir):
         raise FileNotFoundError(f"Directory '{data_dir}' does not exist.")
 
@@ -65,8 +65,13 @@ def load_audio_transcripts(data_dir, sep, metadata_file_name="metadata.txt"):
 
     # Bulk normalize all transcriptions at once
     if transcriptions:
-        normalized_transcriptions = text_processing.StandardArabicTextProcessor.normalize_texts(texts=transcriptions)
-        for i, sample in enumerate(samples):
-            sample["normalized_transcription"] = normalized_transcriptions[i]
+        if heavy_process:
+            processed_transcriptions = text_processing.HeavyArabicTextProcessing.process_texts(texts=transcriptions)
+            for i, sample in enumerate(samples):
+                sample["normalized_transcription"] = processed_transcriptions[i]
+        else:
+            normalized_transcriptions = text_processing.StandardArabicTextProcessor.normalize_texts(texts=transcriptions)
+            for i, sample in enumerate(samples):
+                sample["normalized_transcription"] = normalized_transcriptions[i]
 
     return samples

@@ -1,3 +1,5 @@
+import gc
+
 import torch
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
 from tqdm import tqdm
@@ -69,7 +71,7 @@ class XLSRInference:
             records (list): List of audio records containing waveform, sample_rate, 
                           transcription, and audio_path
         """
-        all_refs_processed = []
+        all_refs_normalized = []
         all_hyps = []
         all_audio_paths = []
         if not isinstance(records, list):
@@ -79,7 +81,7 @@ class XLSRInference:
             waveform = record["waveform"]
             audio_path = record['audio_path']
             transcription = record['transcription']
-            processed_transcription = record['processed_transcription']
+            normalized_transcription = record['normalized_transcription']
             all_audio_paths.append(audio_path)
             try:
                 inputs = self.processor(
@@ -98,37 +100,52 @@ class XLSRInference:
                 LOGGER.error(f"⚠️ Sample {i+1}, Name: {record['audio_path']}, failed: {e}")
                 continue
             
-            all_refs_processed.append(processed_transcription)
+            all_refs_normalized.append(normalized_transcription)
             all_hyps.append(raw_prediction)
             self._samples_info[audio_path] = {
                 "raw_transcription": transcription,
-                "processed_transcription": processed_transcription,
+                "normalized_transcription": normalized_transcription,
                 "raw_prediction": raw_prediction,
                 "normalized_prediction": None,
-                "processed_prediction": None
             }
 
-        all_hyps_normalized = text_processing.ArabicTextProcessor.normalize_texts(all_hyps)
-        all_hyps_processed =  text_processing.ArabicTextProcessor.process_texts(all_hyps)     
+        all_hyps_normalized = text_processing.BasicArabicTextProcessing.normalize_texts(all_hyps)
+        self._finalize_info(all_audio_paths=all_audio_paths, all_refs_normalized=all_refs_normalized, all_hyps_normalized=all_hyps_normalized)
+        self._overall_metrics = metrics.BasicSTTMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
+    
+    def _finalize_info(self, all_audio_paths, all_refs_normalized, all_hyps_normalized):
+        """
+        Finalize predictions by normalizing them and computing metrics for each sample.
+
+        Args:
+            all_audio_paths (list): List of audio file paths.
+            all_refs_normalized (list): List of normalized reference texts.
+            all_hyps_normalized (list): List of normalized hypothesis texts.
+        """
         for i, audio_path in enumerate(all_audio_paths):
             if audio_path in self._samples_info:
                 try:
                     self._samples_info[audio_path]["normalized_prediction"] = all_hyps_normalized[i]
-                    self._samples_info[audio_path]["processed_prediction"] = all_hyps_processed[i]
-                    sample_metrics = metrics.FilteredS2TMetrics.evaluate(
-                        refs=all_refs_processed[i],
-                        hyps=all_hyps_processed[i],
-                        single_sample=True
+                    sample_metrics = metrics.BasicSTTMetrics.evaluate(
+                        refs=all_refs_normalized[i],
+                        hyps=all_hyps_normalized[i],
                     )
                     self._samples_info[audio_path]["metrics"] = sample_metrics
                 except Exception as e:
                     LOGGER.error(f"Error processing sample {i+1}, Name: {audio_path}, failed: {e}")
-                    LOGGER.info(f"{self._samples_info[audio_path]}")
-                    self._samples_info.pop(audio_path, None)
+                    self._samples_info[audio_path]["metrics"] = {
+                        "word_accuracy": None,
+                        "char_accuracy": None,
+                    }
                     continue
+            else:
+                self._samples_info[audio_path] = {
+                    "normalized_prediction": None,
+                    "metrics": {
+                        "word_accuracy": None,
+                        "char_accuracy": None,
+                    }}
 
-        self._overall_metrics = metrics.FilteredS2TMetrics.evaluate(refs=all_refs_processed, hyps=all_hyps_processed)
-    
     def summary_of_evaluation(self):
         """
         Display a simple summary of the overall evaluation metrics.
@@ -141,13 +158,26 @@ class XLSRInference:
         for k, v in self._overall_metrics.items():
             LOGGER.info(f"{k}: {v}")
 
-    @property
-    def samples_info(self):
-        return self._samples_info
-   
+    def reset(self):
+        self._overall_metrics = None
+        self._samples_info = {}
+        
+        # Optional: Clear GPU cache if using CUDA
+        gc.collect()
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+            torch.cuda.reset_peak_memory_stats()
+        
+        LOGGER.info("SeamlessM4t instance has been reset. Model and processor remain loaded.")
+
     @property
     def overall_metrics(self):
         return self._overall_metrics
+
+    @property
+    def samples_info(self):
+        return self._samples_info
 
 # Example usage:
 # xlsr_object = XLSRInference(device="cuda", model_version="xlsr-53", lang_id="ar")

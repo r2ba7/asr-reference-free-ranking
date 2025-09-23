@@ -56,24 +56,25 @@ class Fastconformer_hybridInference:
             try:
                 output = self.model.transcribe([audio_path])
                 raw_prediction = output[0].text
-                validated_raw_prediction = validate.ValidateText.validate_text_in_ar(raw_prediction)
+                if not raw_prediction or raw_prediction.strip() == "":
+                   raise ValueError("Empty transcription result")
 
             except Exception as e:
                 LOGGER.error(f"Sample {i+1}, Name: {audio_path}, failed: {e}")
                 continue
 
             all_refs_normalized.append(normalized_transcription)
-            all_hyps.append(validated_raw_prediction)
+            all_hyps.append(raw_prediction)
             self._samples_info[audio_path] = {
                 "raw_transcription": transcription,
                 "normalized_transcription": normalized_transcription,
-                "raw_prediction": validated_raw_prediction,
+                "raw_prediction": raw_prediction,
                 "normalized_prediction": None,
             }
-
-        all_hyps_normalized = text_processing.StandardArabicTextProcessor.normalize_texts(all_hyps)
+                
+        all_hyps_normalized = text_processing.BasicArabicTextProcessing.normalize_texts(all_hyps)
         self._finalize_info(all_audio_paths=all_audio_paths, all_refs_normalized=all_refs_normalized, all_hyps_normalized=all_hyps_normalized)
-        self._overall_metrics = metrics.StandardSTTMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
+        self._overall_metrics = metrics.BasicSTTMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
 
     def _finalize_info(self, all_audio_paths, all_refs_normalized, all_hyps_normalized):
         """
@@ -88,10 +89,9 @@ class Fastconformer_hybridInference:
             if audio_path in self._samples_info:
                 try:
                     self._samples_info[audio_path]["normalized_prediction"] = all_hyps_normalized[i]
-                    sample_metrics = metrics.StandardSTTMetrics.evaluate(
+                    sample_metrics = metrics.BasicSTTMetrics.evaluate(
                         refs=all_refs_normalized[i],
                         hyps=all_hyps_normalized[i],
-                        single_sample=True
                     )
                     self._samples_info[audio_path]["metrics"] = sample_metrics
                 except Exception as e:
@@ -99,10 +99,16 @@ class Fastconformer_hybridInference:
                     self._samples_info[audio_path]["metrics"] = {
                         "word_accuracy": None,
                         "char_accuracy": None,
-                        "average_score": None,
                     }
                     continue
-
+            else:
+                self._samples_info[audio_path] = {
+                    "normalized_prediction": None,
+                    "metrics": {
+                        "word_accuracy": None,
+                        "char_accuracy": None,
+                    }}
+                
     def summary_of_evaluation(self):
         """
         Display a simple summary of the overall evaluation metrics.

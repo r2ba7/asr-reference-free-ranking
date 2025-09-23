@@ -70,7 +70,7 @@ def load_audio_transcripts(data_dir, sep, heavy_process=False, metadata_file_nam
             for i, sample in enumerate(samples):
                 sample["normalized_transcription"] = processed_transcriptions[i]
         else:
-            normalized_transcriptions = text_processing.StandardArabicTextProcessor.normalize_texts(texts=transcriptions)
+            normalized_transcriptions = text_processing.BasicArabicTextProcessing.normalize_texts(texts=transcriptions)
             for i, sample in enumerate(samples):
                 sample["normalized_transcription"] = normalized_transcriptions[i]
 

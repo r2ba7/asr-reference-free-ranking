@@ -1,5 +1,45 @@
 import jiwer
 
+class BasicSTTMetrics:
+
+    @staticmethod
+    def _normalize_inputs(refs, hyps):
+        """
+        Normalize inputs to ensure refs and hyps are lists of strings.
+        Convert single strings to single-element lists.
+        """
+        if not refs or not hyps:
+            return [], []
+        
+        if isinstance(refs, str):
+            refs = [refs]
+        if isinstance(hyps, str):
+            hyps = [hyps]
+
+        if len(refs) != len(hyps):
+            return refs[:min(len(refs), len(hyps))], hyps[:min(len(refs), len(hyps))]
+
+        return refs, hyps
+
+    @staticmethod
+    def wer(refs, hyps):
+        wer_score = jiwer.wer(refs, hyps) * 100
+        return round(min(wer_score, 100.0), 3)
+
+    @staticmethod
+    def cer(refs, hyps):
+        cer_score = jiwer.cer(refs, hyps) * 100
+        return round(min(cer_score, 100.0), 3)
+
+    @staticmethod
+    def evaluate(refs, hyps):
+        refs, hyps = BasicSTTMetrics._normalize_inputs(refs, hyps)
+        return {
+            "wer (%)": BasicSTTMetrics.wer(refs, hyps),
+            "cer (%)": BasicSTTMetrics.cer(refs, hyps),
+        }
+
+
 class StandardSTTMetrics:
     @staticmethod
     def _normalize_inputs(refs, hyps):

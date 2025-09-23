@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 from stt_benchmarking.utils import text_processing
 from stt_benchmarking.utils import metrics
-from stt_benchmarking.models.llms.openrouter_api import get_response
+from stt_benchmarking.models.llms.openrouter_api import TokenValidator
 from .. import LOGGER
 
 class EnsembleInference:
@@ -760,12 +760,17 @@ class EnsembleInferenceOld:
         return aligned_results
 
 class EnsembleInferenceRefactored:
-    def __init__(self, llm_validation):
-        self.llm_validation = llm_validation
+    def __init__(self, use_llm):
+        self.use_llm = use_llm
+        if self.use_llm:
+            self.initialize_llm()
         self._input_to_fusion = {}
         self._fusion_results = []
         self._processed_results = []
         self._overall_metrics = None
+
+    def initialize_llm(self):
+        self.llm_validator = TokenValidator()
     
     @staticmethod
     def compute_weights(accuracies):
@@ -1495,10 +1500,10 @@ class EnsembleInferenceRefactored:
             candidates_tokens = [element['tokens'] for element in alignment_results]
             voting_result = self.unweighted_voting_scheme(alignment_results)
             voting_result["candidates_tokens"] = candidates_tokens
-            if self.llm_validation:
-                voting_result["llm_validation"] = get_response(
-                    candidate_tokens=voting_result["candidates_tokens"],
-                    fusion_tokens=voting_result["fusion_tokens"]
+            if self.use_llm:
+                voting_result["use_llm"] =  self.llm_validator.main(
+                    fusion_tokens=voting_result["fusion_tokens"],
+                    candidate_tokens=voting_result["candidates_tokens"]
                 )
             return voting_result
 
@@ -1530,29 +1535,58 @@ class EnsembleInferenceRefactored:
 
         self._fusion_results = sorted(results, key=lambda x: x["audio_path"])
 
-    def _process_fusion_results(self):
-        if self.llm_validation:
-            llms_validated_transcripts = [
-                " ".join(result["llm_validation"].adjusted_fusion_tokens)
-                for result in self._fusion_results
-            ]
-            self._llms_normalized_hypths = text_processing.StandardArabicTextProcessor.normalize_texts(llms_validated_transcripts)
-        else:
-            fusion_transcripts = [result['fusion_transcript'] for result in self._fusion_results]
-            self._normalized_hypths = text_processing.StandardArabicTextProcessor.normalize_texts(fusion_transcripts)
+    def _process_fusion_results(self, clean_records_sample):
+        # Build a dict for quick reference lookup by audio_path
+        refs_by_path = {
+            record["audio_path"]: record["normalized_transcription"]
+            for record in clean_records_sample
+        }
 
-    
-    def evaluate(self, normalized_transcriptions):
-        self._process_fusion_results()
-        if self.llm_validation:
-            self._overall_metrics_llms = metrics.StandardSTTMetrics.evaluate(refs=normalized_transcriptions, hyps=self._llms_normalized_hypths)
+        hyps = []
+        refs = []
+
+        for result in self._fusion_results:
+            audio_path = result["audio_path"]
+
+            # Skip if no matching reference exists
+            if audio_path not in refs_by_path:
+                continue
+
+            # Choose hypothesis based on validation setting
+            if self.use_llm:
+                hyp = result["use_llm"].adjusted_transcript
+            else:
+                hyp = result["fusion_transcript"]
+
+            refs.append(refs_by_path[audio_path])
+            hyps.append(hyp)
+
+        # Normalize hypotheses
+        if self.use_llm:
+            self._llms_normalized_hypths = text_processing.StandardArabicTextProcessor.normalize_texts(hyps)
+            self._refs_llms = refs
         else:
-            self._overall_metrics = metrics.StandardSTTMetrics.evaluate(refs=normalized_transcriptions, hyps=self._normalized_hypths)
+            self._normalized_hypths = text_processing.StandardArabicTextProcessor.normalize_texts(hyps)
+            self._refs = refs
+
+
+    def evaluate(self, clean_records_sample):
+        # Prepare refs + hyps aligned by audio_path
+        self._process_fusion_results(clean_records_sample)
+
+        if self.use_llm:
+            self._overall_metrics_llms = metrics.StandardSTTMetrics.evaluate(
+                refs=self._refs_llms,
+                hyps=self._llms_normalized_hypths
+            )
+        else:
+            self._overall_metrics = metrics.StandardSTTMetrics.evaluate(
+                refs=self._refs,
+                hyps=self._normalized_hypths
+            )
 
     def summary_of_evaluation(self):
-
-        
-        if self.llm_validation:
+        if self.use_llm:
             if not hasattr(self, '_overall_metrics_llms') or not self._overall_metrics_llms:
                 LOGGER.warning("No evaluation metrics available. Run EnsembleInferenceRefactored.evaluate first.")
                 return
@@ -1569,8 +1603,6 @@ class EnsembleInferenceRefactored:
             LOGGER.info("Overall Evaluation Summary:")
             for k, v in self._overall_metrics.items():
                 LOGGER.info(f"{k}: {v}")
-
-
 
     def reset(self):
         """
@@ -1623,3 +1655,7 @@ class EnsembleInferenceRefactored:
     @property
     def overall_metrics(self):
         return self._overall_metrics
+    
+    @property
+    def overall_metrics_llm(self):
+        return self._overall_metrics_llms

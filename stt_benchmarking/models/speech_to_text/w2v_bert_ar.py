@@ -88,9 +88,9 @@ class w2vBERTInference:
                 "normalized_prediction": None,
             }
 
-        all_hyps_normalized = text_processing.StandardArabicTextProcessor.normalize_texts(all_hyps)
+        all_hyps_normalized = text_processing.BasicArabicTextProcessing.normalize_texts(all_hyps)
         self._finalize_info(all_audio_paths=all_audio_paths, all_refs_normalized=all_refs_normalized, all_hyps_normalized=all_hyps_normalized)
-        self._overall_metrics = metrics.StandardSTTMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
+        self._overall_metrics = metrics.BasicSTTMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
 
     def _finalize_info(self, all_audio_paths, all_refs_normalized, all_hyps_normalized):
         """
@@ -105,10 +105,9 @@ class w2vBERTInference:
             if audio_path in self._samples_info:
                 try:
                     self._samples_info[audio_path]["normalized_prediction"] = all_hyps_normalized[i]
-                    sample_metrics = metrics.StandardSTTMetrics.evaluate(
+                    sample_metrics = metrics.BasicSTTMetrics.evaluate(
                         refs=all_refs_normalized[i],
                         hyps=all_hyps_normalized[i],
-                        single_sample=True
                     )
                     self._samples_info[audio_path]["metrics"] = sample_metrics
                 except Exception as e:
@@ -116,9 +115,15 @@ class w2vBERTInference:
                     self._samples_info[audio_path]["metrics"] = {
                         "word_accuracy": None,
                         "char_accuracy": None,
-                        "average_score": None,
                     }
                     continue
+            else:
+                self._samples_info[audio_path] = {
+                    "normalized_prediction": None,
+                    "metrics": {
+                        "word_accuracy": None,
+                        "char_accuracy": None,
+                    }}
         
     def summary_of_evaluation(self):
         """

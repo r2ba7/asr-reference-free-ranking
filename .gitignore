@@ -2,6 +2,8 @@ data/
 notebooks/
 documents/
 __pycache__/
+reports/
 
 *.py[cod]
 *.docx
+*.env

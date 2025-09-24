@@ -530,7 +530,7 @@ class StandardArabicTextProcessor:
         return [re.sub(r'\s+', ' ', text.strip()) for text in texts]
 
     @staticmethod
-    def normalize_texts(texts: Union[str, List[str]], normalize_final_letters: bool = True) -> Union[str, List[str]]:
+    def normalize_texts(texts: Union[str, List[str]], normalize_final_letters: bool = True, substitute=False) -> Union[str, List[str]]:
         """
         Process Arabic text(s) through the complete Arabic text processing pipeline.
         All processing is done in bulk mode for optimal performance.
@@ -575,6 +575,14 @@ class StandardArabicTextProcessor:
 
         # Step 7: Clean excessive whitespace (NEW STEP)
         processed_texts = StandardArabicTextProcessor.clean_whitespace(processed_texts)
+        if substitute:
+            replaced_texts = SUBSTITUTE_OBJ(
+                text=processed_texts,
+                is_corpus=False,
+                is_asmo=False
+            )
+            replaced_texts = [re.sub(r"\s+", " ", t).strip() for t in replaced_texts]
+            return replaced_texts[0] if is_single_input else replaced_texts
 
-        # Return in the same format as input
+        # No substitution case
         return processed_texts[0] if is_single_input else processed_texts

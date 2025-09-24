@@ -1,42 +1,85 @@
 import jiwer
 
+# Update phase 1.0 to accuracy as well
 class BasicSTTMetrics:
 
     @staticmethod
     def _normalize_inputs(refs, hyps):
-        """
-        Normalize inputs to ensure refs and hyps are lists of strings.
-        Convert single strings to single-element lists.
-        """
-        if not refs or not hyps:
-            return [], []
-        
         if isinstance(refs, str):
             refs = [refs]
         if isinstance(hyps, str):
             hyps = [hyps]
 
+        # guarantee at least empty string instead of None
+        if not hyps:
+            hyps = [""]
+
         if len(refs) != len(hyps):
-            return refs[:min(len(refs), len(hyps))], hyps[:min(len(refs), len(hyps))]
+            n = min(len(refs), len(hyps))
+            refs, hyps = refs[:n], hyps[:n]
 
         return refs, hyps
 
     @staticmethod
-    def wer(refs, hyps):
-        wer_score = jiwer.wer(refs, hyps) * 100
-        return round(min(wer_score, 100.0), 3)
+    def wer_details(refs, hyps):
+        measures = jiwer.compute_measures(refs, hyps)
+
+        ref_words = " ".join(refs).split()
+        hyp_words = " ".join(hyps).split()
+        ref_len = len(ref_words)
+        hyp_len = len(hyp_words)
+
+        # here ref_len should never be 0 in your pipeline
+        wer = round(measures["wer"] * 100, 2)
+
+        halluc_ratio = round(measures["insertions"] / ref_len, 2) if ref_len > 0 else None
+
+        return {
+            "wer (%)": wer,
+            "substitutions": measures["substitutions"],
+            "deletions": measures["deletions"],
+            "insertions": measures["insertions"],
+            "hits": measures["hits"],
+            "ref_length": ref_len,
+            "hyp_length": hyp_len,
+            "hallucination_ratio": halluc_ratio,
+        }
 
     @staticmethod
-    def cer(refs, hyps):
-        cer_score = jiwer.cer(refs, hyps) * 100
-        return round(min(cer_score, 100.0), 3)
+    def cer_details(refs, hyps):
+        def char_transform(texts):
+            return [list(t.strip()) for t in texts]
+
+        out = jiwer.process_words(
+            refs, hyps,
+            reference_transform=char_transform,
+            hypothesis_transform=char_transform
+        )
+
+        ref_len = sum(len(r) for r in refs)
+        hyp_len = sum(len(h) for h in hyps)
+
+        cer = round(out.wer * 100, 2)
+
+        halluc_ratio = round(out.insertions / ref_len, 2) if ref_len > 0 else None
+
+        return {
+            "cer (%)": cer,
+            "substitutions": out.substitutions,
+            "deletions": out.deletions,
+            "insertions": out.insertions,
+            "hits": out.hits,
+            "ref_length": ref_len,
+            "hyp_length": hyp_len,
+            "hallucination_ratio": halluc_ratio,
+        }
 
     @staticmethod
     def evaluate(refs, hyps):
         refs, hyps = BasicSTTMetrics._normalize_inputs(refs, hyps)
         return {
-            "wer (%)": BasicSTTMetrics.wer(refs, hyps),
-            "cer (%)": BasicSTTMetrics.cer(refs, hyps),
+            "word_error_rate": BasicSTTMetrics.wer_details(refs, hyps),
+            "character_error_rate": BasicSTTMetrics.cer_details(refs, hyps),
         }
 
 

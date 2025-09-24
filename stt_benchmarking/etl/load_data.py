@@ -3,11 +3,9 @@ import os
 import torchaudio
 
 from stt_benchmarking.utils import text_processing
+from . import LOGGER
 
-import os
-import torchaudio
-
-def load_audio_transcripts(data_dir, sep, heavy_process=False, metadata_file_name="metadata.txt"):
+def load_audio_transcripts(data_dir, sep, processing_level=0, metadata_file_name="metadata.txt", **kwargs):
     if not os.path.isdir(data_dir):
         raise FileNotFoundError(f"Directory '{data_dir}' does not exist.")
 
@@ -65,12 +63,21 @@ def load_audio_transcripts(data_dir, sep, heavy_process=False, metadata_file_nam
 
     # Bulk normalize all transcriptions at once
     if transcriptions:
-        if heavy_process:
+        if processing_level == 0:
+            LOGGER.info("Using BasicArabicTextProcessing")
+            processed_transcriptions = text_processing.BasicArabicTextProcessing.normalize_texts(texts=transcriptions)
+            for i, sample in enumerate(samples):
+                sample["normalized_transcription"] = processed_transcriptions[i]
+        elif processing_level == 1:
+            LOGGER.info("Using HeavyArabicTextProcessing")
             processed_transcriptions = text_processing.HeavyArabicTextProcessing.process_texts(texts=transcriptions)
             for i, sample in enumerate(samples):
                 sample["normalized_transcription"] = processed_transcriptions[i]
-        else:
-            normalized_transcriptions = text_processing.BasicArabicTextProcessing.normalize_texts(texts=transcriptions)
+        elif processing_level == 2:
+            LOGGER.info("Using StandardArabicTextProcessor")
+            substitute = kwargs.get("substitute", False)
+            LOGGER.info(f"Using substitute: {substitute}")
+            normalized_transcriptions = text_processing.StandardArabicTextProcessor.normalize_texts(texts=transcriptions, substitute=substitute)
             for i, sample in enumerate(samples):
                 sample["normalized_transcription"] = normalized_transcriptions[i]
 

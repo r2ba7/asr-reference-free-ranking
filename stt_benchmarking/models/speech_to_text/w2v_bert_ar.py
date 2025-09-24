@@ -77,7 +77,7 @@ class w2vBERTInference:
 
             except Exception as e:
                 LOGGER.error(f"⚠️ Sample {i+1}, Name: {record['audio_path']}, failed: {e}")
-                continue
+                raw_prediction = ""
 
             all_refs_normalized.append(normalized_transcription)
             all_hyps.append(raw_prediction)
@@ -88,7 +88,7 @@ class w2vBERTInference:
                 "normalized_prediction": None,
             }
 
-        all_hyps_normalized = text_processing.BasicArabicTextProcessing.normalize_texts(all_hyps)
+        all_hyps_normalized = text_processing.StandardArabicTextProcessor.normalize_texts(all_hyps, substitute=True)
         self._finalize_info(all_audio_paths=all_audio_paths, all_refs_normalized=all_refs_normalized, all_hyps_normalized=all_hyps_normalized)
         self._overall_metrics = metrics.BasicSTTMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
 
@@ -113,17 +113,42 @@ class w2vBERTInference:
                 except Exception as e:
                     LOGGER.error(f"Error processing sample {i+1}, Name: {audio_path}, failed: {e}")
                     self._samples_info[audio_path]["metrics"] = {
-                        "word_accuracy": None,
-                        "char_accuracy": None,
+                        "word_error_rate": {
+                            "wer (%)": None,
+                            "substitutions": None,
+                            "deletions": None,
+                            "insertions": None,
+                            "hits": None,
+                        },
+                        "character_error_rate": {
+                            "cer (%)": None,
+                            "substitutions": None,
+                            "deletions": None,
+                            "insertions": None,
+                            "hits": None,
+                        },
                     }
                     continue
             else:
                 self._samples_info[audio_path] = {
                     "normalized_prediction": None,
                     "metrics": {
-                        "word_accuracy": None,
-                        "char_accuracy": None,
-                    }}
+                        "word_error_rate": {
+                            "wer (%)": None,
+                            "substitutions": None,
+                            "deletions": None,
+                            "insertions": None,
+                            "hits": None,
+                        },
+                        "character_error_rate": {
+                            "cer (%)": None,
+                            "substitutions": None,
+                            "deletions": None,
+                            "insertions": None,
+                            "hits": None,
+                        },
+                    },
+                }
         
     def summary_of_evaluation(self):
         """
@@ -145,3 +170,17 @@ class w2vBERTInference:
     def samples_info(self):
         return self._samples_info
 
+    def reset(self):
+        import gc
+        
+        self._overall_metrics = None
+        self._samples_info = {}
+        
+        # Optional: Clear GPU cache if using CUDA
+        gc.collect()
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+            torch.cuda.reset_peak_memory_stats()
+        
+        LOGGER.info("SeamlessM4t instance has been reset. Model and processor remain loaded.")

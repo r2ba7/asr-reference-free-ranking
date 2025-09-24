@@ -1,8 +1,10 @@
 import gc
 
+from datasets import Dataset
 import torch
 from transformers import AutoProcessor, SeamlessM4Tv2Model, pipeline
 from tqdm import tqdm
+import numpy as np
 
 from . import LOGGER
 from stt_benchmarking.utils import (
@@ -93,7 +95,7 @@ class SeamlessM4TInference:
 
             except Exception as e:
                 LOGGER.error(f"⚠️ Sample {i+1}, Name: {record['audio_path']}, failed: {e}")
-                continue
+                raw_prediction = ""
 
             all_refs_normalized.append(normalized_transcription)
             all_hyps.append(raw_prediction)
@@ -104,7 +106,7 @@ class SeamlessM4TInference:
                 "normalized_prediction": None,
             }
 
-        all_hyps_normalized = text_processing.BasicArabicTextProcessing.normalize_texts(all_hyps)
+        all_hyps_normalized = text_processing.StandardArabicTextProcessor.normalize_texts(all_hyps, substitute=True)
         self._finalize_info(all_audio_paths=all_audio_paths, all_refs_normalized=all_refs_normalized, all_hyps_normalized=all_hyps_normalized)
         self._overall_metrics = metrics.BasicSTTMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
 
@@ -124,16 +126,47 @@ class SeamlessM4TInference:
                     sample_metrics = metrics.BasicSTTMetrics.evaluate(
                         refs=all_refs_normalized[i],
                         hyps=all_hyps_normalized[i],
-                        single_sample=True
                     )
                     self._samples_info[audio_path]["metrics"] = sample_metrics
                 except Exception as e:
                     LOGGER.error(f"Error processing sample {i+1}, Name: {audio_path}, failed: {e}")
                     self._samples_info[audio_path]["metrics"] = {
-                        "word_accuracy": None,
-                        "char_accuracy": None,
+                        "word_error_rate": {
+                            "wer (%)": None,
+                            "substitutions": None,
+                            "deletions": None,
+                            "insertions": None,
+                            "hits": None,
+                        },
+                        "character_error_rate": {
+                            "cer (%)": None,
+                            "substitutions": None,
+                            "deletions": None,
+                            "insertions": None,
+                            "hits": None,
+                        },
                     }
                     continue
+            else:
+                self._samples_info[audio_path] = {
+                    "normalized_prediction": None,
+                    "metrics": {
+                        "word_error_rate": {
+                            "wer (%)": None,
+                            "substitutions": None,
+                            "deletions": None,
+                            "insertions": None,
+                            "hits": None,
+                        },
+                        "character_error_rate": {
+                            "cer (%)": None,
+                            "substitutions": None,
+                            "deletions": None,
+                            "insertions": None,
+                            "hits": None,
+                        },
+                    },
+                }
 
     def summary_of_evaluation(self):
         """
@@ -173,7 +206,7 @@ class SeamlessM4TPipelineInference:
     A class for loading and running inference with Seamless M4T models using Pipeline.
     """
     
-    def __init__(self, device, model_version="v2", chunk_length_s=30):
+    def __init__(self, device, model_version="v2", chunk_length_s=30, batch_size=16):
         """
         Initialize the SeamlessM4TInference class.
         
@@ -185,7 +218,7 @@ class SeamlessM4TPipelineInference:
         self.device = device if isinstance(device, torch.device) else torch.device(device)
         self.model_version = model_version.lower()
         self.chunk_length_s = chunk_length_s
-        
+        self.batch_size = batch_size
         if self.model_version not in ['v2']:
             raise ValueError("model_version must be 'v2' (only v2 is currently supported)")
         
@@ -208,11 +241,12 @@ class SeamlessM4TPipelineInference:
         pipe = pipeline(
             "automatic-speech-recognition",
             model=MODEL_ID,
-            device=0 if self.device.type == "cuda" else -1,
-            torch_dtype=torch.float16 if self.device.type == "cuda" else torch.float32,
+            device=0,
+            torch_dtype=torch.float16,
             chunk_length_s=self.chunk_length_s,  # Enable chunking
             stride_length_s=5,
-            ignore_warning=True  # Overlap between chunks for better continuity
+            ignore_warning=True,
+            batch_size=self.batch_size,
         )
         
         LOGGER.info(f"Loaded Seamless M4T {self.model_version.upper()} Pipeline with {self.chunk_length_s}s chunking")
@@ -262,7 +296,7 @@ class SeamlessM4TPipelineInference:
 
             except Exception as e:
                 LOGGER.error(f"⚠️ Sample {i+1}, Name: {record['audio_path']}, failed: {e}")
-                continue
+                raw_prediction = ""
 
             all_refs_normalized.append(normalized_transcription)
             all_hyps.append(raw_prediction)
@@ -274,76 +308,109 @@ class SeamlessM4TPipelineInference:
             }
 
         # Normalize predictions using your existing text processor
-        all_hyps_normalized = text_processing.BasicArabicTextProcessing.normalize_texts(all_hyps)
+        all_hyps_normalized = text_processing.StandardArabicTextProcessor.normalize_texts(all_hyps, substitute=True)
         self._finalize_info(all_audio_paths=all_audio_paths, all_refs_normalized=all_refs_normalized, all_hyps_normalized=all_hyps_normalized)
         self._overall_metrics = metrics.BasicSTTMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
     
-    def run_batch_inference(self, records, batch_size=8):
+    @decorators.Decorators.calculate_execution_time
+    def run_batch_inference(self, records):
         """
-        Run batch inference using Pipeline for better efficiency.
-        
+        Run batch inference using Hugging Face Dataset for better efficiency.
+
         Args:
             records (list): List of audio records
             batch_size (int): Number of samples to process in each batch
         """
+        def process_batch(batch):
+            batch_audio = batch["waveform"]
+            batch_audio = [np.array(audio, dtype=np.float32) if not isinstance(audio, np.ndarray) else audio for audio in batch_audio]
+            with torch.no_grad():
+                try:
+                    # Run pipeline on batch
+                    results = self.pipe(
+                        batch_audio,
+                        # batch_size=len(batch_audio),  # Use actual batch size
+                        generate_kwargs={"tgt_lang": "arb",
+                                        "num_beams": 1,
+                                        "do_sample": False},
+                        
+                    )
+
+                    # Process results
+                    batch_hyps = []
+                    for result in results:
+                        if isinstance(result, dict):
+                            raw_prediction = result.get("text", "")
+                        elif isinstance(result, list) and len(result) > 0:
+                            raw_prediction = " ".join([chunk.get("text", "") for chunk in result if isinstance(chunk, dict)])
+                        else:
+                            raw_prediction = str(result)
+                        batch_hyps.append(raw_prediction)
+
+                    return {"predictions": batch_hyps}
+                except Exception as e:
+                    LOGGER.error(f"Batch processing failed: {e}")
+                    return {"predictions": ["" for _ in batch_audio]}
+                
+        if not isinstance(records, list):
+            records = [records]
+
+        # Preprocess waveforms to NumPy arrays
+        processed_records = []
         all_refs_normalized = []
         all_hyps = []
         all_audio_paths = []
-        
-        if not isinstance(records, list):
-            records = [records]
-        
-        # Process in batches
-        for i in tqdm(range(0, len(records), batch_size), desc="Processing Batches"):
-            batch = records[i:i + batch_size]
-            batch_audio = []
-            batch_sample_rates = []
-            batch_paths = []
-            batch_refs = []
+        for record in records:
+            waveform = record["waveform"]
+            if isinstance(waveform, torch.Tensor):
+                waveform = waveform.squeeze().numpy()
+
+            processed_records.append({
+                "waveform": waveform,
+                "audio_path": record["audio_path"],
+                "transcription": record["transcription"],
+                "normalized_transcription": record["normalized_transcription"],
+                "sample_rate": record["sample_rate"]
+            })
+
+        # Convert to Hugging Face Dataset
+        dataset = Dataset.from_dict({
+            "waveform": [r["waveform"] for r in processed_records],
+            "audio_path": [r["audio_path"] for r in processed_records],
+            "transcription": [r["transcription"] for r in processed_records],
+            "normalized_transcription": [r["normalized_transcription"] for r in processed_records],
+            "sample_rate": [r["sample_rate"] for r in processed_records]
+        })
+
+        # Process dataset in batches with explicit batch_size
+        dataset = dataset.map(
+            process_batch,
+            batched=True,
+            batch_size=self.batch_size,
+            desc="Processing Batches",
+            drop_last_batch=False  # Keep partial batches
+        )
+
+        # Collect results
+        for i, (audio_path, transcription, normalized_transcription, prediction) in enumerate(zip(
+            dataset["audio_path"], dataset["transcription"], dataset["normalized_transcription"], dataset["predictions"]
+        )):
+            all_refs_normalized.append(normalized_transcription)
+            all_hyps.append(prediction)
+            all_audio_paths.append(audio_path)
             
-            for record in batch:
-                waveform = record["waveform"]
-                if isinstance(waveform, torch.Tensor):
-                    waveform = waveform.numpy()
-                
-                batch_audio.append(waveform)
-                batch_sample_rates.append(record['sample_rate'])
-                batch_paths.append(record["audio_path"])
-                batch_refs.append(record["normalized_transcription"])
-            
-            try:
-                # Run batch inference
-                results = self.pipe(
-                    batch_audio,
-                    batch_size=batch_size,
-                    generate_kwargs={"tgt_lang": "arb"}
-                )
-                
-                for j, (result, audio_path, transcription, normalized_transcription) in enumerate(zip(results, batch_paths, [records[i+j]["transcription"] for j in range(len(batch))], batch_refs)):
-                    if isinstance(result, dict):
-                        raw_prediction = result.get("text", "")
-                    else:
-                        raw_prediction = str(result)
-                    
-                    all_refs_normalized.append(normalized_transcription)
-                    all_hyps.append(raw_prediction)
-                    all_audio_paths.append(audio_path)
-                    
-                    self._samples_info[audio_path] = {
-                        "raw_transcription": transcription,
-                        "normalized_transcription": normalized_transcription,
-                        "raw_prediction": raw_prediction,
-                        "normalized_prediction": None,
-                    }
-                    
-            except Exception as e:
-                LOGGER.error(f"⚠️ Batch starting at {i} failed: {e}")
-                continue
-        
-        # Normalize predictions
-        all_hyps_normalized = text_processing.BasicArabicTextProcessing.normalize_texts(all_hyps)
+            self._samples_info[audio_path] = {
+                "raw_transcription": transcription,
+                "normalized_transcription": normalized_transcription,
+                "raw_prediction": prediction,
+                "normalized_prediction": None,
+            }
+
+        # Normalize predictions and finalize
+        all_hyps_normalized = text_processing.StandardArabicTextProcessor.normalize_texts(all_hyps, substitute=True)
         self._finalize_info(all_audio_paths=all_audio_paths, all_refs_normalized=all_refs_normalized, all_hyps_normalized=all_hyps_normalized)
         self._overall_metrics = metrics.BasicSTTMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
+
 
     def _finalize_info(self, all_audio_paths, all_refs_normalized, all_hyps_normalized):
         """
@@ -366,17 +433,42 @@ class SeamlessM4TPipelineInference:
                 except Exception as e:
                     LOGGER.error(f"Error processing sample {i+1}, Name: {audio_path}, failed: {e}")
                     self._samples_info[audio_path]["metrics"] = {
-                        "word_accuracy": None,
-                        "char_accuracy": None,
+                        "word_error_rate": {
+                            "wer (%)": None,
+                            "substitutions": None,
+                            "deletions": None,
+                            "insertions": None,
+                            "hits": None,
+                        },
+                        "character_error_rate": {
+                            "cer (%)": None,
+                            "substitutions": None,
+                            "deletions": None,
+                            "insertions": None,
+                            "hits": None,
+                        },
                     }
                     continue
             else:
                 self._samples_info[audio_path] = {
                     "normalized_prediction": None,
                     "metrics": {
-                        "word_accuracy": None,
-                        "char_accuracy": None,
-                    }}
+                        "word_error_rate": {
+                            "wer (%)": None,
+                            "substitutions": None,
+                            "deletions": None,
+                            "insertions": None,
+                            "hits": None,
+                        },
+                        "character_error_rate": {
+                            "cer (%)": None,
+                            "substitutions": None,
+                            "deletions": None,
+                            "insertions": None,
+                            "hits": None,
+                        },
+                    },
+                }
 
     def summary_of_evaluation(self):
         """

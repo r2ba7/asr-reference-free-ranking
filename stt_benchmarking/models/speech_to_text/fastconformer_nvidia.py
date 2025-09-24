@@ -54,14 +54,12 @@ class Fastconformer_hybridInference:
             normalized_transcription = record['normalized_transcription']
             all_audio_paths.append(audio_path)
             try:
-                output = self.model.transcribe([audio_path])
+                output = self.model.transcribe([audio_path], verbose=False, batch_size=64)
                 raw_prediction = output[0].text
-                if not raw_prediction or raw_prediction.strip() == "":
-                   raise ValueError("Empty transcription result")
 
             except Exception as e:
                 LOGGER.error(f"Sample {i+1}, Name: {audio_path}, failed: {e}")
-                continue
+                raw_prediction = ""
 
             all_refs_normalized.append(normalized_transcription)
             all_hyps.append(raw_prediction)
@@ -72,7 +70,7 @@ class Fastconformer_hybridInference:
                 "normalized_prediction": None,
             }
                 
-        all_hyps_normalized = text_processing.BasicArabicTextProcessing.normalize_texts(all_hyps)
+        all_hyps_normalized = text_processing.StandardArabicTextProcessor.normalize_texts(all_hyps, substitute=True)
         self._finalize_info(all_audio_paths=all_audio_paths, all_refs_normalized=all_refs_normalized, all_hyps_normalized=all_hyps_normalized)
         self._overall_metrics = metrics.BasicSTTMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
 
@@ -97,17 +95,42 @@ class Fastconformer_hybridInference:
                 except Exception as e:
                     LOGGER.error(f"Error processing sample {i+1}, Name: {audio_path}, failed: {e}")
                     self._samples_info[audio_path]["metrics"] = {
-                        "word_accuracy": None,
-                        "char_accuracy": None,
+                        "word_error_rate": {
+                            "wer (%)": None,
+                            "substitutions": None,
+                            "deletions": None,
+                            "insertions": None,
+                            "hits": None,
+                        },
+                        "character_error_rate": {
+                            "cer (%)": None,
+                            "substitutions": None,
+                            "deletions": None,
+                            "insertions": None,
+                            "hits": None,
+                        },
                     }
                     continue
             else:
                 self._samples_info[audio_path] = {
                     "normalized_prediction": None,
                     "metrics": {
-                        "word_accuracy": None,
-                        "char_accuracy": None,
-                    }}
+                        "word_error_rate": {
+                            "wer (%)": None,
+                            "substitutions": None,
+                            "deletions": None,
+                            "insertions": None,
+                            "hits": None,
+                        },
+                        "character_error_rate": {
+                            "cer (%)": None,
+                            "substitutions": None,
+                            "deletions": None,
+                            "insertions": None,
+                            "hits": None,
+                        },
+                    },
+                }
                 
     def summary_of_evaluation(self):
         """

@@ -1,9 +1,10 @@
 import gc
 
+from datasets import Dataset
 import torch
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 from tqdm import tqdm
-from faster_whisper import WhisperModel
+from faster_whisper import WhisperModel, BatchedInferencePipeline
 import numpy as np
 
 from .. import LOGGER
@@ -20,7 +21,7 @@ class WhisperPipelineInference:
     Supports both Whisper V2 and V3 with automatic chunking.
     """
 
-    def __init__(self, device="cuda", model_version="v3", chunk_length_s=30):
+    def __init__(self, device="cuda", model_version="v3", chunk_length_s=30, batch_size=16):
         """
         Initialize the WhisperPipelineInference class.
 
@@ -32,7 +33,7 @@ class WhisperPipelineInference:
         self.device = device if isinstance(device, torch.device) else torch.device(device)
         self.model_version = model_version.lower()
         self.chunk_length_s = chunk_length_s
-        
+        self.batch_size = batch_size
         if self.model_version not in ["v2", "v3"]:
             raise ValueError("model_version must be either 'v2' or 'v3'")
 
@@ -57,12 +58,12 @@ class WhisperPipelineInference:
         pipe = pipeline(
             "automatic-speech-recognition",
             model=MODEL_ID,
-            device=0 if self.device.type == "cuda" else -1,
-            torch_dtype=torch.float16 if self.device.type == "cuda" else torch.float32,
+            device=0,
+            torch_dtype=torch.float16,
             chunk_length_s=self.chunk_length_s,  # Enable automatic chunking
             stride_length_s=5,  # Overlap between chunks for better continuity
-            return_timestamps=True,
-            ignore_warning=True
+            ignore_warning=True,
+            batch_size=self.batch_size,
         )
 
         LOGGER.info(f"Loaded Whisper {self.model_version.upper()} Pipeline with {self.chunk_length_s}s chunking")
@@ -138,179 +139,109 @@ class WhisperPipelineInference:
                 "normalized_prediction": None,
             }
 
-        all_hyps_normalized = text_processing.BasicArabicTextProcessing.normalize_texts(all_hyps)
+        all_hyps_normalized = text_processing.StandardArabicTextProcessor.normalize_texts(all_hyps, substitute=True)
         self._finalize_info(all_audio_paths=all_audio_paths, all_refs_normalized=all_refs_normalized, all_hyps_normalized=all_hyps_normalized)
         self._overall_metrics = metrics.BasicSTTMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
 
-    def run_batch_inference(self, records, batch_size=8):
+    @decorators.Decorators.calculate_execution_time 
+    def run_batch_inference(self, records):
         """
-        Run batch inference using Pipeline for better efficiency.
-        
+        Run batch inference using Hugging Face Dataset for better efficiency.
+
         Args:
             records (list): List of audio records
             batch_size (int): Number of samples to process in each batch
         """
+        def process_batch(batch):
+            batch_audio = batch["waveform"]
+            # Ensure batch_audio is a list of NumPy arrays
+            batch_audio = [np.array(audio, dtype=np.float32) if not isinstance(audio, np.ndarray) else audio for audio in batch_audio]
+            with torch.no_grad():
+                try:
+                    # Run pipeline on batch
+                    results = self.pipe(
+                        batch_audio,
+                        batch_size=len(batch_audio),  # Use actual batch size
+                        generate_kwargs={
+                            "language": "arabic",
+                            "task": "transcribe"
+                        }
+                    )
+
+                    # Process results
+                    batch_hyps = []
+                    for result in results:
+                        if isinstance(result, dict):
+                            raw_prediction = result.get("text", "")
+                        elif isinstance(result, list) and len(result) > 0:
+                            raw_prediction = " ".join([chunk.get("text", "") for chunk in result if isinstance(chunk, dict)])
+                        else:
+                            raw_prediction = str(result)
+                        batch_hyps.append(raw_prediction)
+
+                    return {"predictions": batch_hyps}
+                except Exception as e:
+                    LOGGER.error(f"Batch processing failed: {e}")
+                    return {"predictions": ["" for _ in batch_audio]}
+                
+        if not isinstance(records, list):
+            records = [records]
+
+        processed_records = []
         all_refs_normalized = []
         all_hyps = []
         all_audio_paths = []
-        
-        if not isinstance(records, list):
-            records = [records]
-        
-        # Process in batches
-        for i in tqdm(range(0, len(records), batch_size), desc="Processing Batches"):
-            batch = records[i:i + batch_size]
-            batch_audio = []
-            batch_paths = []
-            batch_refs = []
-            batch_transcriptions = []
+        for record in records:
+            waveform = record["waveform"]
+            if isinstance(waveform, torch.Tensor):
+                waveform = waveform.squeeze().numpy()
+
+            processed_records.append({
+                "waveform": waveform,
+                "audio_path": record["audio_path"],
+                "transcription": record["transcription"],
+                "normalized_transcription": record["normalized_transcription"],
+                "sample_rate": record["sample_rate"]
+            })
+
+        # Convert to Hugging Face Dataset
+        dataset = Dataset.from_dict({
+            "waveform": [r["waveform"] for r in processed_records],
+            "audio_path": [r["audio_path"] for r in processed_records],
+            "transcription": [r["transcription"] for r in processed_records],
+            "normalized_transcription": [r["normalized_transcription"] for r in processed_records],
+            "sample_rate": [r["sample_rate"] for r in processed_records]
+        })
+
+
+        # Process dataset in batches with explicit batch_size
+        dataset = dataset.map(
+            process_batch,
+            batched=True,
+            batch_size=self.batch_size,
+            desc="Processing Batches",
+            drop_last_batch=False  # Keep partial batches
+        )
+
+        # Collect results
+        for i, (audio_path, transcription, normalized_transcription, prediction) in enumerate(zip(
+            dataset["audio_path"], dataset["transcription"], dataset["normalized_transcription"], dataset["predictions"]
+        )):
+            all_refs_normalized.append(normalized_transcription)
+            all_hyps.append(prediction)
+            all_audio_paths.append(audio_path)
             
-            for record in batch:
-                waveform = record["waveform"]
-                if isinstance(waveform, torch.Tensor):
-                    waveform = waveform.squeeze().numpy()
-                elif hasattr(waveform, 'squeeze'):
-                    waveform = waveform.squeeze()
-                
-                # Ensure float32 and 1D
-                if waveform.dtype != np.float32:
-                    waveform = waveform.astype(np.float32)
-                
-                if len(waveform.shape) > 1:
-                    waveform = waveform[0] if waveform.shape[0] < waveform.shape[1] else waveform[:, 0]
-                
-                batch_audio.append(waveform)
-                batch_paths.append(record["audio_path"])
-                batch_refs.append(record["normalized_transcription"])
-                batch_transcriptions.append(record["transcription"])
-            
-            try:
-                # Run batch inference
-                results = self.pipe(
-                    batch_audio,
-                    batch_size=batch_size,
-                    generate_kwargs={
-                        "language": "arabic",
-                        "task": "transcribe"
-                    }
-                )
-                
-                # Process results
-                for j, (result, audio_path, transcription, normalized_transcription) in enumerate(zip(results, batch_paths, batch_transcriptions, batch_refs)):
-                    if isinstance(result, dict):
-                        raw_prediction = result.get("text", "")
-                    elif isinstance(result, list) and len(result) > 0:
-                        raw_prediction = " ".join([chunk.get("text", "") for chunk in result if isinstance(chunk, dict)])
-                    else:
-                        raw_prediction = str(result)
-                    
-                    all_refs_normalized.append(normalized_transcription)
-                    all_hyps.append(raw_prediction)
-                    all_audio_paths.append(audio_path)
-                    
-                    self._samples_info[audio_path] = {
-                        "raw_transcription": transcription,
-                        "normalized_transcription": normalized_transcription,
-                        "raw_prediction": raw_prediction,
-                        "normalized_prediction": None,
-                    }
-                    
-            except Exception as e:
-                LOGGER.error(f"⚠️ Batch starting at {i} failed: {e}")
-                continue
-        
-        # Normalize predictions
-        all_hyps_normalized = text_processing.BasicArabicTextProcessing.normalize_texts(all_hyps)
+            self._samples_info[audio_path] = {
+                "raw_transcription": transcription,
+                "normalized_transcription": normalized_transcription,
+                "raw_prediction": prediction,
+                "normalized_prediction": None,
+            }
+
+        # Normalize predictions and finalize
+        all_hyps_normalized = text_processing.StandardArabicTextProcessor.normalize_texts(all_hyps, substitute=True)
         self._finalize_info(all_audio_paths=all_audio_paths, all_refs_normalized=all_refs_normalized, all_hyps_normalized=all_hyps_normalized)
         self._overall_metrics = metrics.BasicSTTMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
-
-    def process_single_audio(self, waveform, sample_rate, audio_path=""):
-        """
-        Process a single audio file with automatic chunking.
-        
-        Args:
-            waveform: Audio waveform
-            sample_rate: Sample rate of the audio
-            audio_path: Path identifier for logging
-            
-        Returns:
-            dict: Result with text and optional timestamps
-        """
-        try:
-            # Prepare audio
-            if isinstance(waveform, torch.Tensor):
-                audio_input = waveform.squeeze().numpy()
-            else:
-                audio_input = waveform.squeeze() if hasattr(waveform, 'squeeze') else waveform
-
-            if audio_input.dtype != np.float32:
-                audio_input = audio_input.astype(np.float32)
-            
-            if len(audio_input.shape) > 1:
-                audio_input = audio_input[0] if audio_input.shape[0] < audio_input.shape[1] else audio_input[:, 0]
-
-            # Get duration for logging
-            duration = len(audio_input) / sample_rate
-            LOGGER.info(f"Processing {audio_path} ({duration:.1f}s) - will auto-chunk if > {self.chunk_length_s}s")
-
-            # Run inference
-            result = self.pipe(
-                audio_input,
-                generate_kwargs={
-                    "language": "arabic",
-                    "task": "transcribe"
-                }
-            )
-            
-            return result
-                
-        except Exception as e:
-            LOGGER.error(f"Failed to process {audio_path}: {e}")
-            return {"text": ""}
-
-    def get_transcription_with_timestamps(self, waveform, sample_rate, audio_path=""):
-        """
-        Get transcription with word-level timestamps.
-        
-        Args:
-            waveform: Audio waveform
-            sample_rate: Sample rate of the audio
-            audio_path: Path identifier for logging
-            
-        Returns:
-            dict: Result with text and timestamps
-        """
-        try:
-            # Temporarily enable word-level timestamps
-            original_return_timestamps = getattr(self.pipe, 'return_timestamps', True)
-            
-            # Prepare audio
-            if isinstance(waveform, torch.Tensor):
-                audio_input = waveform.squeeze().numpy()
-            else:
-                audio_input = waveform.squeeze() if hasattr(waveform, 'squeeze') else waveform
-
-            if audio_input.dtype != np.float32:
-                audio_input = audio_input.astype(np.float32)
-            
-            if len(audio_input.shape) > 1:
-                audio_input = audio_input[0] if audio_input.shape[0] < audio_input.shape[1] else audio_input[:, 0]
-
-            # Run inference with word timestamps
-            result = self.pipe(
-                audio_input,
-                return_timestamps="word",  # Get word-level timestamps
-                generate_kwargs={
-                    "language": "arabic",
-                    "task": "transcribe"
-                }
-            )
-            
-            return result
-                
-        except Exception as e:
-            LOGGER.error(f"Failed to get timestamps for {audio_path}: {e}")
-            return {"text": "", "chunks": []}
         
     def _finalize_info(self, all_audio_paths, all_refs_normalized, all_hyps_normalized):
         """
@@ -333,17 +264,42 @@ class WhisperPipelineInference:
                 except Exception as e:
                     LOGGER.error(f"Error processing sample {i+1}, Name: {audio_path}, failed: {e}")
                     self._samples_info[audio_path]["metrics"] = {
-                        "word_accuracy": None,
-                        "char_accuracy": None,
+                        "word_error_rate": {
+                            "wer (%)": None,
+                            "substitutions": None,
+                            "deletions": None,
+                            "insertions": None,
+                            "hits": None,
+                        },
+                        "character_error_rate": {
+                            "cer (%)": None,
+                            "substitutions": None,
+                            "deletions": None,
+                            "insertions": None,
+                            "hits": None,
+                        },
                     }
                     continue
             else:
                 self._samples_info[audio_path] = {
                     "normalized_prediction": None,
                     "metrics": {
-                        "word_accuracy": None,
-                        "char_accuracy": None,
-                    }}
+                        "word_error_rate": {
+                            "wer (%)": None,
+                            "substitutions": None,
+                            "deletions": None,
+                            "insertions": None,
+                            "hits": None,
+                        },
+                        "character_error_rate": {
+                            "cer (%)": None,
+                            "substitutions": None,
+                            "deletions": None,
+                            "insertions": None,
+                            "hits": None,
+                        },
+                    },
+                }
 
     def summary_of_evaluation(self):
         """
@@ -384,7 +340,7 @@ class FasterWhisperInference:
     Supports both Whisper V2 and V3.
     """
 
-    def __init__(self, device="cuda", model_version="v3"):
+    def __init__(self, device="cuda", model_version="v3", batch_size=32):
         """
         Initialize the FasterWhisperInference class.
 
@@ -394,10 +350,12 @@ class FasterWhisperInference:
         """
         self.device = device
         self.model_version = model_version.lower()
+        self.batch_size = batch_size
         if self.model_version not in ["v2", "v3"]:
             raise ValueError("model_version must be either 'v2' or 'v3'")
 
         self.model = self._load_model()
+        self.pipeline = self._load_pipeline()
         self._samples_info = {}
         self._overall_metrics = None
 
@@ -406,21 +364,27 @@ class FasterWhisperInference:
         Load the FasterWhisper model.
         """
         if self.model_version == "v2":
-            MODEL_ID = "openai/whisper-large-v2"
+            MODEL_ID = "large-v2"
         else:
             MODEL_ID = "large-v3"
 
         # FasterWhisper automatically handles device and quantization
-        device_str = "cuda" if str(self.device) == "cuda" else "cpu"
-        model = WhisperModel(
-            MODEL_ID,
-            device=device_str,
-            compute_type="float16" if self.device == "cuda" else "int8",  # can adjust for speed/accuracy
-        )
-
+        model = WhisperModel(MODEL_ID, device="cuda", compute_type="float16")
         LOGGER.info(f"Loaded FasterWhisper {self.model_version.upper()} Model")
         return model
+    
+    def _load_pipeline(self):
+        """
+        Load the Whisper pipeline with automatic chunking support.
+        
+        Returns:
+            pipeline: Hugging Face pipeline for automatic speech recognition
+        """
+        pipe = BatchedInferencePipeline(model=self.model)
+        LOGGER.info(f"Loaded Whisper {self.model_version.upper()} Pipeline")
+        return pipe
 
+    @decorators.Decorators.calculate_execution_time 
     def run_inference_one_by_one(self, records):
         """
         Run inference on audio records one by one and compute metrics.
@@ -444,7 +408,7 @@ class FasterWhisperInference:
 
             try:
                 # FasterWhisper handles long audios internally
-                segments, info = self.model.transcribe(
+                segments, _ = self.model.transcribe(
                     audio_path,
                     language="ar",   # Arabic
                     task="transcribe"
@@ -466,7 +430,57 @@ class FasterWhisperInference:
                 "normalized_prediction": None,
             }
 
-        all_hyps_normalized = text_processing.BasicArabicTextProcessing.normalize_texts(all_hyps)
+        all_hyps_normalized = text_processing.StandardArabicTextProcessor.normalize_texts(all_hyps, substitute=True)
+        self._finalize_info(all_audio_paths=all_audio_paths, all_refs_normalized=all_refs_normalized, all_hyps_normalized=all_hyps_normalized)
+        self._overall_metrics = metrics.BasicSTTMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
+
+    @decorators.Decorators.calculate_execution_time 
+    def run_batch_inference(self, records):
+        """
+        Run inference on audio records one by one and compute metrics.
+
+        Args:
+            records (list): List of audio records containing waveform, sample_rate, 
+                          transcription, and audio_path
+        """
+        all_refs_normalized = []
+        all_hyps = []
+        all_audio_paths = []
+
+        if not isinstance(records, list):
+            records = [records]
+
+        for i, record in tqdm(enumerate(records), total=len(records), desc="Processing Records"):
+            audio_path = record["audio_path"]
+            transcription = record["transcription"]
+            normalized_transcription = record["normalized_transcription"]
+            all_audio_paths.append(audio_path)
+            try:
+                # FasterWhisper handles long audios internally
+                segments, _ = self.pipeline.transcribe(
+                    audio_path,
+                    batch_size=self.batch_size,
+                    language="ar",   # Arabic
+                    task="transcribe"
+                )
+
+                # Concatenate all segment texts
+                raw_prediction = " ".join([seg.text for seg in segments])
+
+            except Exception as e:
+                LOGGER.error(f"⚠️ Sample {i+1}, Name: {audio_path}, failed: {e}")
+                raw_prediction = ""
+
+            all_refs_normalized.append(normalized_transcription)
+            all_hyps.append(raw_prediction)
+            self._samples_info[audio_path] = {
+                "raw_transcription": transcription,
+                "normalized_transcription": normalized_transcription,
+                "raw_prediction": raw_prediction,
+                "normalized_prediction": None,
+            }
+
+        all_hyps_normalized = text_processing.StandardArabicTextProcessor.normalize_texts(all_hyps, substitute=True)
         self._finalize_info(all_audio_paths=all_audio_paths, all_refs_normalized=all_refs_normalized, all_hyps_normalized=all_hyps_normalized)
         self._overall_metrics = metrics.BasicSTTMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
 
@@ -491,16 +505,42 @@ class FasterWhisperInference:
                 except Exception as e:
                     LOGGER.error(f"Error processing sample {i+1}, Name: {audio_path}, failed: {e}")
                     self._samples_info[audio_path]["metrics"] = {
-                        "word_accuracy": None,
-                        "char_accuracy": None,
+                        "word_error_rate": {
+                            "wer (%)": None,
+                            "substitutions": None,
+                            "deletions": None,
+                            "insertions": None,
+                            "hits": None,
+                        },
+                        "character_error_rate": {
+                            "cer (%)": None,
+                            "substitutions": None,
+                            "deletions": None,
+                            "insertions": None,
+                            "hits": None,
+                        },
                     }
                     continue
             else:
-                LOGGER.error(f"Error processing sample {i+1}, Name: {audio_path}, failed: {e}")
-                self._samples_info[audio_path]["metrics"] = {
-                    "word_accuracy": None,
-                    "char_accuracy": None,
-                }  
+                self._samples_info[audio_path] = {
+                    "normalized_prediction": None,
+                    "metrics": {
+                        "word_error_rate": {
+                            "wer (%)": None,
+                            "substitutions": None,
+                            "deletions": None,
+                            "insertions": None,
+                            "hits": None,
+                        },
+                        "character_error_rate": {
+                            "cer (%)": None,
+                            "substitutions": None,
+                            "deletions": None,
+                            "insertions": None,
+                            "hits": None,
+                        },
+                    },
+                }
 
     def summary_of_evaluation(self):
         """

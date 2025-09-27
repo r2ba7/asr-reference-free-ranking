@@ -194,7 +194,7 @@ class XLSRInference:
             torch.cuda.ipc_collect()
             torch.cuda.reset_peak_memory_stats()
         
-        LOGGER.info("SeamlessM4t instance has been reset. Model and processor remain loaded.")
+        LOGGER.info("XLSR instance has been reset. Model and processor remain loaded.")
 
     @property
     def overall_metrics(self):

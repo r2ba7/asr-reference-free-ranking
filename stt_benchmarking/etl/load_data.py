@@ -26,13 +26,11 @@ def load_audio_transcripts(data_dir, sep, processing_level=0, metadata_file_name
             if sep == "|":
                 parts = line.strip().split("|", 1)
                 audio_filename, transcription = parts
-                audio_source = "Saudi"
             elif sep == " ":
                 parts = line.strip().split(" ", 1)
                 audio_filename, transcription = parts
                 if "wav" not in audio_filename:
                     audio_filename = audio_filename + ".wav"
-                audio_source = "Egypt"
             
             audio_path = os.path.join(waves_dir, audio_filename)  
             if os.path.exists(audio_path):
@@ -52,7 +50,6 @@ def load_audio_transcripts(data_dir, sep, processing_level=0, metadata_file_name
                     "waveform": waveform,
                     "sample_rate": sample_rate,
                     "transcription": transcription,
-                    "audio_source": audio_source,
                     "audio_duration": duration_sec
                 })
                 

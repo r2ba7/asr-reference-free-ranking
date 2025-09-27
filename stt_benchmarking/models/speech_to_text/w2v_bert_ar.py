@@ -183,4 +183,4 @@ class w2vBERTInference:
             torch.cuda.ipc_collect()
             torch.cuda.reset_peak_memory_stats()
         
-        LOGGER.info("SeamlessM4t instance has been reset. Model and processor remain loaded.")
+        LOGGER.info("W2v Bert instance has been reset. Model and processor remain loaded.")

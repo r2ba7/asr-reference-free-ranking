@@ -76,6 +76,7 @@ def scrape_newspapers_with_cleaning(no_articles_per_paper, words_per_article):
     }
 
     articles_data = []
+
     for country, papers in news_sources.items():
         for paper, url in papers.items():
             print(f"Scraping {paper}...")
@@ -87,30 +88,35 @@ def scrape_newspapers_with_cleaning(no_articles_per_paper, words_per_article):
                     content.nlp()
 
                     if not content.text:
-                        continue 
-
-                    # Clean the text
-                    cleaned_text = clean_arabic_text(content.text)
-                    
-                    if not cleaned_text:  
                         continue
 
-                    # Split words
-                    words = cleaned_text.split()
-                    word_count = len(words)
+                    cleaned_text = clean_arabic_text(content.text)
+                    if not cleaned_text:
+                        continue
 
-                    # If longer than 100, take only first 100 words
-                    if word_count > words_per_article:
-                        words = words[:words_per_article]
-                        cleaned_text = " ".join(words)
-                        word_count = words_per_article
+                    # ---- NEW SENTENCE CUTTING LOGIC ----
+                    # Find both Arabic and Latin periods
+                    period_positions = [m.end() for m in re.finditer(r"[\u06D4\u002E]", cleaned_text)]
+                    if period_positions:
+                        first_end = period_positions[0]
+                        words_before_first = len(cleaned_text[:first_end].split())
+
+                        if words_before_first <= 10 and len(period_positions) > 1:
+                            # First sentence too short (≤10 words) → cut at second period
+                            cut_text = cleaned_text[:period_positions[1]].strip()
+                        else:
+                            # Normal → cut at first period
+                            cut_text = cleaned_text[:first_end].strip()
+                    else:
+                        # No period at all — just take everything
+                        cut_text = cleaned_text
 
                     articles_data.append({
                         "country": country,
                         "source": paper,
                         "title": content.title,
-                        "text": cleaned_text,
-                        "word_count": word_count,
+                        "text": cut_text,
+                        "word_count": len(cut_text.split()),
                         "keywords": content.keywords,
                         "url": content.url
                     })

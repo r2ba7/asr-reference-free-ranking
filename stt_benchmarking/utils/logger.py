@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 import logging
 import inspect
 import os
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, ClassVar
 import colorlog
 import pytz
 from datetime import datetime
@@ -20,36 +20,46 @@ class Logger:
     logger: logging.Logger = field(init=False)
     _instances: Dict[str, 'Logger'] = field(default_factory=dict, init=False)
     
+    # Add class variable for singleton pattern
+    _class_instances: ClassVar[Dict[str, 'Logger']] = {}
+    
     def __post_init__(self):
         """Initialize logger with colored output and timestamp filter."""
         self.logger = logging.getLogger(self.logger_name)
         
-        # Prevent duplicate handlers
-        if not self.logger.handlers:
-            self._setup_console_handler()
-            self.logger.addFilter(self.TimingFilter())
-            
+        # CRITICAL: Clear any existing handlers first
+        if self.logger.handlers:
+            self.logger.handlers.clear()
+        
+        # Set up the console handler
+        self._setup_console_handler()
+        self.logger.addFilter(self.TimingFilter())
+        
+        # Set level and disable propagation to prevent duplicate logs
         self.logger.setLevel(self.log_level)
+        self.logger.propagate = False
 
     def _setup_console_handler(self) -> None:
         """Set up console handler with colored output."""
-        handler = logging.StreamHandler()
-        handler.setFormatter(
-            colorlog.ColoredFormatter(
-                "%(log_color)s%(time)s - [%(name)s.%(funcName)s:%(lineno)d] %(levelname)s - %(message)s",
-                datefmt="%Y-%m-%d %H:%M:%S",
-                log_colors={
-                    "DEBUG": "cyan",
-                    "INFO": "green",
-                    "WARNING": "yellow",
-                    "ERROR": "red",
-                    "CRITICAL": "red,bg_white",
-                },
-                secondary_log_colors={},
-                style='%'
+        # Double-check: Only add handler if none exists
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            handler.setFormatter(
+                colorlog.ColoredFormatter(
+                    "%(log_color)s%(time)s - [%(name)s.%(funcName)s:%(lineno)d] %(levelname)s - %(message)s",
+                    datefmt="%Y-%m-%d %H:%M:%S",
+                    log_colors={
+                        "DEBUG": "cyan",
+                        "INFO": "green",
+                        "WARNING": "yellow",
+                        "ERROR": "red",
+                        "CRITICAL": "red,bg_white",
+                    },
+                    secondary_log_colors={},
+                    style='%'
+                )
             )
-        )
-        self.logger.addHandler(handler)
+            self.logger.addHandler(handler)
 
     class TimingFilter(logging.Filter):
         """Custom logging filter to include Cairo timezone in log records."""
@@ -62,20 +72,12 @@ class Logger:
             return True
 
     @classmethod
-    @lru_cache(maxsize=None)
     def get_logger(cls, module_name: Optional[str] = None, include_function: bool = True) -> 'Logger':
         """
         Get or create a logger instance using module name.
-        If `module_name` is not provided, dynamically determines the module name.
-        Optionally includes the calling function name in the logger name.
-
-        Args:
-            module_name (Optional[str]): The module name for the logger.
-            include_function (bool): Whether to append the calling function name.
-
-        Returns:
-            Logger: An instance of the logger with the specified or dynamic name.
+        Uses proper singleton pattern to prevent duplicate instances.
         """
+        
         if not module_name:
             # Inspect the caller frame
             caller_frame = inspect.stack()[1]
@@ -96,7 +98,18 @@ class Logger:
             if include_function and function_name != "<module>":
                 module_name = f"{module_name}.{function_name}"
 
-        return cls(logger_name=module_name)
+        # Create a unique cache key for proper singleton behavior
+        cache_key = f"{module_name}_{include_function}"
+        
+        # Check if instance already exists in class variable
+        if cache_key in cls._class_instances:
+            return cls._class_instances[cache_key]
+        
+        # Create new instance and store in cache
+        instance = cls(logger_name=module_name)
+        cls._class_instances[cache_key] = instance
+        
+        return instance
 
     def add_file_handler(
         self,

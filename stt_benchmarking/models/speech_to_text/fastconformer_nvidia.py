@@ -10,7 +10,7 @@ from stt_benchmarking.utils import (
     validate
 )
 
-class Fastconformer_hybridInference:
+class FastConformerInference:
     def __init__(self):
         """
         Initialize the HubertArabicInference class.

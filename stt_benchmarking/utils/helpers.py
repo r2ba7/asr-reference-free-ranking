@@ -69,4 +69,21 @@ def pick_random_records(records, no_samples, seed=None, with_replacement=False):
             raise ValueError("Requested more samples than available in the records.")
         return random.sample(records, no_samples)
 
+def _empty_metrics():
+    return {
+        "word_error_rate": {
+            "wer (%)": None,
+            "substitutions": None,
+            "deletions": None,
+            "insertions": None,
+            "hits": None,
+        },
+        "character_error_rate": {
+            "cer (%)": None,
+            "substitutions": None,
+            "deletions": None,
+            "insertions": None,
+            "hits": None,
+        },
+    }
 

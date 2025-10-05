@@ -4,16 +4,16 @@ from itertools import islice
 from collections import Counter, OrderedDict
 import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, Any
 
 import numpy as np
 from tqdm import tqdm
 
-from stt_benchmarking.utils import text_processing
-from stt_benchmarking.utils import metrics
-from stt_benchmarking.models.llms.openrouter_api import TokenValidator
-from .. import LOGGER
+from stt_benchmarking.utils import text_processing, helpers, metrics
+from stt_benchmarking.models.llms import openrouter_api
+from . import LOGGER
 
-class EnsembleInferenceRefactored:
+class HybridEnsemble:
     def __init__(self, use_llm):
         self.use_llm = use_llm
         if self.use_llm:
@@ -24,7 +24,7 @@ class EnsembleInferenceRefactored:
         self._overall_metrics = None
 
     def initialize_llm(self):
-        self.llm_validator = TokenValidator()
+        self.REINFORCER = openrouter_api.TokenReinforcer()
     
     @staticmethod
     def compute_weights(accuracies):
@@ -57,7 +57,7 @@ class EnsembleInferenceRefactored:
             return {}
 
         # Collect all unique audio paths
-        all_audio_paths = sorted({path for d in samples_dicts for path in d.keys()})[:100]
+        all_audio_paths = sorted({path for d in samples_dicts for path in d.keys()})[:1]
         # Build combined dict
         combined = {}
         for audio_path in all_audio_paths:
@@ -89,7 +89,7 @@ class EnsembleInferenceRefactored:
         Returns:
             tuple: (is_valid, anchor_info)
         """
-        anchors = EnsembleInferenceRefactored.find_first_anchors(reference, transcription)
+        anchors = HybridEnsemble.find_first_anchors(reference, transcription)
         if not anchors:
             return False, None
             
@@ -373,7 +373,7 @@ class EnsembleInferenceRefactored:
         else: # Handle it later
             alignment_results = align_with_longest_strategy(reference=reference, transcriptions=transcriptions, reference_index=reference_index, reference_type=reference_type)
         return alignment_results
-
+    
     def voting_scheme(self, audio_path, alignment_results):
         """
         Implement majority voting scheme for operations and random voting for tokens.
@@ -512,7 +512,6 @@ class EnsembleInferenceRefactored:
                 "total_models": 0,
                 "operations_length": 0,
                 "metadata": {},
-                "llm_validation": None,
             }
             return voting_result
                 
@@ -537,51 +536,78 @@ class EnsembleInferenceRefactored:
         fusion_transcript = construct_final_transcription(fusion_operations, fusion_tokens)
         confidence_score = calculate_confidence_score(alignment_results, operations_length)
         metadata = create_metadata(alignment_results, fusion_operations)
-        llm_validation = None
-        if self.use_llm:
-            validated = self.llm_validator.main(
-                fusion_transcript=fusion_transcript,
-                fusion_tokens=fusion_tokens,
-                candidate_tokens=[element["tokens"] for element in alignment_results],
-            )
-            fusion_tokens = validated.adjusted_fusion_tokens
-            fusion_transcript = validated.adjusted_transcript
-            llm_validation = validated.dict()
-
+        candidates_tokens = [element["tokens"] for element in alignment_results]
         voting_result[audio_path] = {
             "fusion_transcript": fusion_transcript,
             "fusion_operations": fusion_operations,
             "fusion_tokens": fusion_tokens,
-            "candidates_tokens": [element["tokens"] for element in alignment_results],
+            "candidates_tokens": candidates_tokens,
             "voting_details": voting_details,
             "confidence_score": confidence_score,
             "total_models": len(alignment_results),
             "operations_length": operations_length,
             "metadata": metadata,
-            "llm_validation": llm_validation,
         }
         return voting_result
 
-    def fusion(self, audios_chunk):
+    def llm_reinforcer(self, fusion_tokens, candidates_tokens, max_tokens, chunk_size, overlap):
+        def postprocess_reinforced_output(response: openrouter_api.GeneratedResponse) -> Dict[str, Any]:
+            results = response.reinforced_results
+            final_tokens = []
+            modifications = 0
+            for item in results:
+                token = item.get("token")
+                final_tokens.append(token)
+                if item.get("is_modified"):
+                    modifications += 1
+
+            safe_tokens = [t for t in final_tokens if t not in [None, "None", "Null", "null"]]
+            final_transcript = " ".join(safe_tokens).strip()
+            return {
+                "final_tokens": final_tokens,
+                "final_transcript": final_transcript,
+                "modifications": modifications,
+                "total_tokens": len(final_tokens),
+                "modification_ratio": modifications / len(final_tokens) if final_tokens else 0.0,
+                "is_chunked": response.is_chunked
+            }
+        
+        llm_response = {}
+        if self.use_llm:
+            response = self.REINFORCER.main(
+                fusion_tokens=fusion_tokens,
+                candidate_tokens=candidates_tokens,
+                max_tokens=max_tokens, chunk_size=chunk_size, overlap=overlap, 
+            )
+            llm_response = postprocess_reinforced_output(response=response)
+        return llm_response
+
+    def fusion(self, **kwargs):
         def fuse_sample_transcriptions(audio_path, transcriptions):
             reference_type, reference, reference_index = self.get_reference_from_transcriptions(transcriptions)
-            alignment_results = self.align_transcriptions_to_reference(
-                reference=reference,
-                reference_type=reference_type,
-                reference_index=reference_index,
-                transcriptions=transcriptions
-            )
+            alignment_results = self.align_transcriptions_to_reference(reference=reference, reference_type=reference_type, reference_index=reference_index,
+                                                                       transcriptions=transcriptions)
             voting_result = self.voting_scheme(audio_path, alignment_results)
+            data = voting_result[audio_path]
+            llm_response = self.llm_reinforcer(
+                fusion_tokens=data["fusion_tokens"],
+                candidates_tokens=data["candidates_tokens"],
+                max_tokens=kwargs.get("max_tokens", 25),
+                chunk_size=kwargs.get("chunk_size", 15),
+                overlap=kwargs.get("overlap", 3),
+            )
+            data["llm_response"] = llm_response
+            voting_result[audio_path] = data
             return voting_result
-
-        if not self.input_to_fusion:
-            raise ValueError("Run EnsembleInference.align_model_records first.")
 
         def process_item(item):
             key, value = item
             transcriptions_lists = [t for t in value]
             voting_result = fuse_sample_transcriptions(key, transcriptions_lists)
             return voting_result
+        
+        if not self.input_to_fusion:
+            raise ValueError("Run EnsembleInference.align_model_records first.")
 
         with ThreadPoolExecutor(max_workers=8) as executor:
             futures = {executor.submit(process_item, item): item for item in self.input_to_fusion.items()}
@@ -592,101 +618,41 @@ class EnsembleInferenceRefactored:
                 fusion_results.update(result)
 
         self._fusion_results = dict(sorted(fusion_results.items()))
-        fusion_transcripts = [
-            data.get("fusion_transcript")
-            for data in self._fusion_results.values()
-        ]
-        # normalized_fusion_transcripts = text_processing.StandardArabicTextProcessor.normalize_texts(fusion_transcripts)
-        self._process_fusion_results(
-            all_hyps_normalized=fusion_transcripts,
-            audios_chunk=audios_chunk
-        )
 
-    def _process_fusion_results(self, all_hyps_normalized, audios_chunk):
-        """
-        Finalize fusion results by normalizing predictions and computing metrics
-        for each sample, using normalized_transcription from audios_chunk.
+    def eval(self, audios_chunk):
+        def _eval_common(data):
+            return data.get("fusion_transcript")
 
-        Args:
-            all_hyps_normalized (list): List of normalized fusion hypotheses 
-                                        (same order as self._fusion_results).
-            audios_chunk (list): List of dataset dicts, each containing
-                                "audio_path" and "normalized_transcription".
-        """
-        refs_lookup = {
-            sample["audio_path"]: sample["normalized_transcription"]
-            for sample in audios_chunk
-        }
+        def _eval_llm(data):
+            llm_resp = data.get("llm_response", {})
+            return llm_resp.get("final_transcript")
 
-        for (audio_path, data), norm_transcript in zip(self._fusion_results.items(), all_hyps_normalized):
-            # add hypothesis + reference
-            data["normalized_prediction"] = norm_transcript
+        refs_lookup = {sample["audio_path"]: sample["normalized_transcription"] for sample in audios_chunk}
+        all_refs_normalized = []
+        all_hyps_normalized = []
+        for audio_path, data in self._fusion_results.items():
+            norm_transcript = _eval_llm(data) if self.use_llm else _eval_common(data)
+            data["normalized_prediction"] = text_processing.StandardArabicTextProcessor.main(
+                norm_transcript, substitute=True
+            )
             ref = refs_lookup.get(audio_path)
 
             if ref is not None:
                 data["normalized_transcription"] = ref
                 try:
-                    sample_metrics = metrics.BasicSTTMetrics.evaluate(
-                        refs=ref,
-                        hyps=norm_transcript,
-                    )
+                    sample_metrics = metrics.BasicSTTMetrics.evaluate(refs=ref, hyps=norm_transcript)
                     data["metrics"] = sample_metrics
+                    all_refs_normalized.append(ref)
+                    all_hyps_normalized.append(norm_transcript)
                 except Exception as e:
                     LOGGER.error(f"Metric calc failed for {audio_path}: {e}")
-                    data["metrics"] = {
-                        "word_error_rate": {
-                            "wer (%)": None,
-                            "substitutions": None,
-                            "deletions": None,
-                            "insertions": None,
-                            "hits": None,
-                        },
-                        "character_error_rate": {
-                            "cer (%)": None,
-                            "substitutions": None,
-                            "deletions": None,
-                            "insertions": None,
-                            "hits": None,
-                        },
-                    }
+                    data["metrics"] = helpers._empty_metrics()
             else:
                 LOGGER.warning(f"No reference transcription found for {audio_path}")
                 data["normalized_transcription"] = None
-                data["metrics"] = {
-                    "word_error_rate": {
-                        "wer (%)": None,
-                        "substitutions": None,
-                        "deletions": None,
-                        "insertions": None,
-                        "hits": None,
-                    },
-                    "character_error_rate": {
-                        "cer (%)": None,
-                        "substitutions": None,
-                        "deletions": None,
-                        "insertions": None,
-                        "hits": None,
-                    },
-                }
+                data["metrics"] = helpers._empty_metrics()
 
-    def summary_of_evaluation(self):
-        if self.use_llm:
-            if not hasattr(self, '_overall_metrics_llms') or not self._overall_metrics_llms:
-                LOGGER.warning("No evaluation metrics available. Run EnsembleInferenceRefactored.evaluate first.")
-                return
-            
-            LOGGER.info("LLMS Overall Evaluation Summary:")
-            for k, v in self._overall_metrics_llms.items():
-                LOGGER.info(f"{k}: {v}")
-        
-        else:
-            if not hasattr(self, '_overall_metrics') or not self._overall_metrics:
-                LOGGER.warning("No evaluation metrics available. Run EnsembleInferenceRefactored.evaluate first.")
-                return
-            
-            LOGGER.info("Overall Evaluation Summary:")
-            for k, v in self._overall_metrics.items():
-                LOGGER.info(f"{k}: {v}")
+        self._overall_metrics = metrics.BasicSTTMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
 
     def reset(self):
         """
@@ -728,18 +694,5 @@ class EnsembleInferenceRefactored:
         return self._fusion_results
     
     @property
-    def processed_results(self):
-        """
-        Get the processed results after fusion.
-        """
-        if not self._processed_results:
-            raise ValueError("Run EnsembleInference._process_fusion_results first.")
-        return self._processed_results
-
-    @property
     def overall_metrics(self):
         return self._overall_metrics
-    
-    @property
-    def overall_metrics_llm(self):
-        return self._overall_metrics_llms

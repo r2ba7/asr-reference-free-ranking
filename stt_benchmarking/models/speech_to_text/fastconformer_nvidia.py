@@ -1,17 +1,20 @@
-import nemo.collections.asr as nemo_asr
-from tqdm import tqdm
 import gc
+import time
+
+import torch
+from tqdm import tqdm
+import nemo.collections.asr as nemo_asr
 
 from .. import LOGGER
 from stt_benchmarking.utils import (
     text_processing, 
     decorators, 
     metrics,
-    validate
+    helpers
 )
 
 class FastConformerInference:
-    def __init__(self):
+    def __init__(self, device):
         """
         Initialize the HubertArabicInference class.
 
@@ -21,6 +24,11 @@ class FastConformerInference:
         self.model = self._load_model()
         self._overall_metrics = None
         self._samples_info = {}
+        self.device = torch.device(device)
+        # Add timing/memory tracking
+        self._total_inference_time = 0.0
+        self._total_audio_duration = 0.0
+        self._processed_count = 0
 
     def _load_model(self):
         """
@@ -29,7 +37,7 @@ class FastConformerInference:
         Returns:
             tuple: (model, processor)
         """
-        model = nemo_asr.models.EncDecHybridRNNTCTCBPEModel.from_pretrained(model_name="nvidia/stt_ar_fastconformer_hybrid_large_pcd_v1.0")
+        model = nemo_asr.models.EncDecHybridRNNTCTCBPEModel.from_pretrained(model_name="nvidia/stt_ar_fastconformer_hybrid_large_pcd_v1.0", map_location=self.device)
         LOGGER.info(f"Loaded model stt conformer hybrid")
         return model
     
@@ -42,23 +50,33 @@ class FastConformerInference:
             records (list): List of audio records containing waveform, sample_rate, 
                           transcription, and audio_path
         """
-        all_refs_normalized = []
-        all_hyps = []
-        all_audio_paths = []
-        if not isinstance(records, list):
-            records = [records]
-            
+        all_refs_normalized, all_hyps, all_audio_paths = [], [], []
+        if not isinstance(records, list): records = [records]
         for i, record in tqdm(enumerate(records), total=len(records), desc="Processing Records"):
             audio_path = record['audio_path']
             transcription = record['transcription']
             normalized_transcription = record['normalized_transcription']
+            duration = record["audio_duration"]
             all_audio_paths.append(audio_path)
             try:
+                # Time inference
+                start_time = time.time()
                 output = self.model.transcribe([audio_path], verbose=False, batch_size=64)
                 raw_prediction = output[0].text
-
+                end_time = time.time()
+                
+                inference_time = end_time - start_time
+                
+                # Track timing (skip first 5 for warmup)
+                if self._processed_count > 4:
+                    self._total_inference_time += inference_time
+                    self._total_audio_duration += duration
+                
+                # Track memory (all samples)
+                self._processed_count += 1
             except Exception as e:
                 LOGGER.error(f"Sample {i+1}, Name: {audio_path}, failed: {e}")
+                inference_time = None
                 raw_prediction = ""
 
             all_refs_normalized.append(normalized_transcription)
@@ -68,9 +86,12 @@ class FastConformerInference:
                 "normalized_transcription": normalized_transcription,
                 "raw_prediction": raw_prediction,
                 "normalized_prediction": None,
+                "duration": duration,
+                "inference_time": inference_time,
+                "rtf": inference_time / duration if (inference_time and duration > 0) else None,
             }
                 
-        all_hyps_normalized = text_processing.StandardArabicTextProcessor.normalize_texts(all_hyps, substitute=True)
+        all_hyps_normalized = text_processing.StandardArabicTextProcessor.main(all_hyps, substitute=True)
         self._finalize_info(all_audio_paths=all_audio_paths, all_refs_normalized=all_refs_normalized, all_hyps_normalized=all_hyps_normalized)
         self._overall_metrics = metrics.BasicSTTMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
 
@@ -94,55 +115,45 @@ class FastConformerInference:
                     self._samples_info[audio_path]["metrics"] = sample_metrics
                 except Exception as e:
                     LOGGER.error(f"Error processing sample {i+1}, Name: {audio_path}, failed: {e}")
-                    self._samples_info[audio_path]["metrics"] = {
-                        "word_error_rate": {
-                            "wer (%)": None,
-                            "substitutions": None,
-                            "deletions": None,
-                            "insertions": None,
-                            "hits": None,
-                        },
-                        "character_error_rate": {
-                            "cer (%)": None,
-                            "substitutions": None,
-                            "deletions": None,
-                            "insertions": None,
-                            "hits": None,
-                        },
-                    }
+                    self._samples_info[audio_path]["metrics"] = helpers._empty_metrics()
                     continue
             else:
                 self._samples_info[audio_path] = {
                     "normalized_prediction": None,
-                    "metrics": {
-                        "word_error_rate": {
-                            "wer (%)": None,
-                            "substitutions": None,
-                            "deletions": None,
-                            "insertions": None,
-                            "hits": None,
-                        },
-                        "character_error_rate": {
-                            "cer (%)": None,
-                            "substitutions": None,
-                            "deletions": None,
-                            "insertions": None,
-                            "hits": None,
-                        },
-                    },
+                    "metrics":  helpers._empty_metrics()
                 }
                 
+    def get_performance_summary(self):
+        """Return performance metrics dict"""
+        if self._total_audio_duration == 0:
+            return None
+        
+        return {
+            "average_rtf": self._total_inference_time / self._total_audio_duration if self._total_audio_duration > 0 else None,
+            "total_inference_time": self._total_inference_time,
+            "total_audio_duration": self._total_audio_duration,
+            "processed_samples": self._processed_count
+        }
+
     def summary_of_evaluation(self):
         """
         Display a simple summary of the overall evaluation metrics.
         """
-        if not hasattr(self, '_overall_metrics') or not self._overall_metrics:
+        if not self._overall_metrics:
             LOGGER.warning("No evaluation metrics available. Run inference first.")
             return
-        
+
         LOGGER.info("Overall Evaluation Summary:")
         for k, v in self._overall_metrics.items():
             LOGGER.info(f"{k}: {v}")
+        
+        # Add performance metrics
+        perf = self.get_performance_summary()
+        if perf:
+            LOGGER.info(f"Average RTF: {perf['average_rtf']:.4f}")
+            LOGGER.info(f"Total Inference Time: {perf['total_inference_time']:.2f}s")
+            LOGGER.info(f"Total Audio Duration: {perf['total_audio_duration']:.2f}s")
+            LOGGER.info(f"Processed Samples: {perf['processed_samples']}")
 
     def reset(self):
         """
@@ -152,11 +163,11 @@ class FastConformerInference:
         """
         self._overall_metrics = None
         self._samples_info = {}
-        
-        # Optional: Clear GPU cache if CUDA is available
-        import torch
+        self._total_inference_time = 0.0
+        self._total_audio_duration = 0.0
+        self._processed_count = 0
         gc.collect()
-        if torch.cuda.is_available():
+        if self.device == "cuda":
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
             torch.cuda.reset_peak_memory_stats()

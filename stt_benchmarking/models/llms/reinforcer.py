@@ -242,7 +242,7 @@ class TokenReinforcer:
             return [{"idx": i, "token": tok, "is_modified": False} for i, tok in enumerate(original_chunk_tokens)]
 
     def main(self, fusion_tokens: List[str], candidate_tokens: List[List[str]], 
-             max_tokens: int = 30, chunk_size: int = 20, overlap: int = 3) -> GeneratedResponse:
+             max_tokens: int = 25, chunk_size: int = 15, overlap: int = 3) -> GeneratedResponse:
         is_chunked = self._chunk_needed(fusion_tokens=fusion_tokens, max_tokens=max_tokens)
         LOGGER.info(f"is chunked: {is_chunked}")
         if is_chunked:
@@ -256,106 +256,3 @@ class TokenReinforcer:
             reinforced_results=reinforced_results,
             is_chunked=is_chunked
         )
-    
-
-class TranscriptGenerator:
-    CLIENT = OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=os.getenv("OPENROUTER_API_KEY"),
-    )
-
-    def __init__(self):
-        print(6)
-
-    def _filter_tokens(self, tokens: List[str]) -> str:
-        return " ".join(token for token in tokens if token is not None)
-
-    def _format_token_table(
-        self, fusion_tokens: List[str], candidate_tokens: List[List[str]]
-    ) -> str:
-        num_models = len(candidate_tokens)
-        formatted = []
-
-        for idx, f_tok in enumerate(fusion_tokens):
-            opts = [f_tok]
-            for m in range(num_models):
-                if idx < len(candidate_tokens[m]):
-                    opts.append(candidate_tokens[m][idx])
-            seen = set()
-            opts = [o for o in opts if not (o in seen or seen.add(o))]
-            formatted.append(f"{idx+1}. options = {opts}")
-
-        return "\n".join(formatted)
-
-    def _generate_corrected_transcript(
-        self, fusion_transcript: str, fusion_tokens: List[str], candidate_tokens: List[List[str]]
-    ) -> tuple[str, bool]:
-        token_table = self._format_token_table(fusion_tokens, candidate_tokens)
-        prompt = f"""
-            أنت نظام تعزيز وتصحيح نصوص عربية لناتج التعرف التلقائي على الكلام (ASR).
-            مهمتك: بناء نص عربي صحيح لغوياً ونحوياً من الخيارات المتاحة.
-
-            القواعد:
-            1. لكل موضع، اختر كلمة واحدة فقط من الخيارات المتاحة
-            2. الخيار الأول في كل موضع هو نتيجة التصويت الأكثري
-            3. إذا كان الخيار الأول صحيحاً لغوياً، اختره وأعِد fusion_modified: false
-            4. إذا كان الخيار الأول خاطئاً، اختر البديل الصحيح من الخيارات الأخرى وأعِد fusion_modified: true
-            5. لا تُنشئ كلمات جديدة، لا تغيّر الترتيب، لا تحذف أو تضيف مواضع
-
-            خيارات الكلمات (الخيار الأول = نتيجة التصويت):
-            {token_table}
-
-            أعِد كائن JSON بهذا الشكل:
-            {{"corrected_transcript": "<النص النهائي>", "fusion_modified": true/false}}
-            """
-
-        try:
-            completion = self.CLIENT.chat.completions.create(
-                model="google/gemini-2.5-flash",
-                messages=[{"role": "user", "content": prompt}],
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "CorrectedTranscriptResponse",
-                        "strict": True,
-                        "schema": {
-                            "type": "object",
-                            "properties": {
-                                "corrected_transcript": {"type": "string"},
-                                "fusion_modified": {"type": "boolean"}
-                            },
-                            "required": ["corrected_transcript", "fusion_modified"],
-                        },
-                    },
-                },
-            )
-
-            result = json.loads(completion.choices[0].message.content)
-            corrected_transcript = result["corrected_transcript"].strip()
-            fusion_modified = result["fusion_modified"]
-            if not corrected_transcript:
-                LOGGER.warning("LLM returned empty transcript. Falling back.")
-                return fusion_transcript, False
-
-            return corrected_transcript, fusion_modified
-
-        except Exception as e:
-            LOGGER.error(f"LLM generation failed: {e}. Falling back to fusion transcript.")
-            return fusion_transcript, False
-
-    def main(
-        self, fusion_transcript: str, fusion_tokens: List[str], candidate_tokens: List[List[str]]
-    ) -> GeneratedResponse:
-        corrected_transcript, fusion_modified = self._generate_corrected_transcript(
-            fusion_transcript, fusion_tokens, candidate_tokens
-        )
-        adjusted_tokens = corrected_transcript.split() if corrected_transcript else []
-
-        return GeneratedResponse(
-            original_fusion_tokens=fusion_tokens,
-            original_fusion_transcript=fusion_transcript,
-            adjusted_fusion_tokens=adjusted_tokens,
-            adjusted_transcript=corrected_transcript,
-            fusion_modified=fusion_modified
-        )
-

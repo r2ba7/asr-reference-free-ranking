@@ -1,4 +1,5 @@
 import gc
+import time
 
 from datasets import Dataset
 import torch
@@ -9,7 +10,7 @@ import numpy as np
 
 from .. import LOGGER
 from stt_benchmarking.utils import (
-    validate, 
+    helpers, 
     decorators, 
     metrics,
     text_processing
@@ -139,7 +140,7 @@ class WhisperPipelineInference:
                 "normalized_prediction": None,
             }
 
-        all_hyps_normalized = text_processing.StandardArabicTextProcessor.normalize_texts(all_hyps, substitute=True)
+        all_hyps_normalized = text_processing.StandardArabicTextProcessor.main(all_hyps, substitute=True)
         self._finalize_info(all_audio_paths=all_audio_paths, all_refs_normalized=all_refs_normalized, all_hyps_normalized=all_hyps_normalized)
         self._overall_metrics = metrics.BasicSTTMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
 
@@ -239,7 +240,7 @@ class WhisperPipelineInference:
             }
 
         # Normalize predictions and finalize
-        all_hyps_normalized = text_processing.StandardArabicTextProcessor.normalize_texts(all_hyps, substitute=True)
+        all_hyps_normalized = text_processing.StandardArabicTextProcessor.main(all_hyps, substitute=True)
         self._finalize_info(all_audio_paths=all_audio_paths, all_refs_normalized=all_refs_normalized, all_hyps_normalized=all_hyps_normalized)
         self._overall_metrics = metrics.BasicSTTMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
         
@@ -341,13 +342,6 @@ class FasterWhisperInference:
     """
 
     def __init__(self, device="cuda", model_version="v3", batch_size=32):
-        """
-        Initialize the FasterWhisperInference class.
-
-        Args:
-            device (str): Device to run the model on ('cuda' or 'cpu')
-            model_version (str): Version of Whisper model to use ('v2' or 'v3')
-        """
         self.device = device
         self.model_version = model_version.lower()
         self.batch_size = batch_size
@@ -358,6 +352,11 @@ class FasterWhisperInference:
         self.pipeline = self._load_pipeline()
         self._samples_info = {}
         self._overall_metrics = None
+        
+        # Add timing/memory tracking
+        self._total_inference_time = 0.0
+        self._total_audio_duration = 0.0
+        self._processed_count = 0
 
     def _load_model(self):
         """
@@ -384,6 +383,7 @@ class FasterWhisperInference:
         LOGGER.info(f"Loaded Whisper {self.model_version.upper()} Pipeline")
         return pipe
 
+
     @decorators.Decorators.calculate_execution_time 
     def run_inference_one_by_one(self, records):
         """
@@ -393,33 +393,37 @@ class FasterWhisperInference:
             records (list): List of audio records containing waveform, sample_rate, 
                           transcription, and audio_path
         """
-        all_refs_normalized = []
-        all_hyps = []
-        all_audio_paths = []
-
-        if not isinstance(records, list):
-            records = [records]
-
+        all_refs_normalized, all_hyps, all_audio_paths = [], [], []
+        if not isinstance(records, list): records = [records]
         for i, record in tqdm(enumerate(records), total=len(records), desc="Processing Records"):
             audio_path = record["audio_path"]
             transcription = record["transcription"]
             normalized_transcription = record["normalized_transcription"]
+            duration = record["audio_duration"]
             all_audio_paths.append(audio_path)
-
             try:
-                # FasterWhisper handles long audios internally
+                # Time inference
+                start_time = time.time()
                 segments, _ = self.model.transcribe(
                     audio_path,
                     language="ar",   # Arabic
                     task="transcribe"
                 )
-
-                # Concatenate all segment texts
                 raw_prediction = " ".join([seg.text for seg in segments])
-
+                end_time = time.time()
+                
+                inference_time = end_time - start_time
+                
+                # Track timing (skip first 5 for warmup)
+                if self._processed_count > 4:
+                    self._total_inference_time += inference_time
+                    self._total_audio_duration += duration
+                
+                self._processed_count += 1
             except Exception as e:
                 LOGGER.error(f"⚠️ Sample {i+1}, Name: {audio_path}, failed: {e}")
-                continue
+                inference_time = None
+                raw_prediction = ""
 
             all_refs_normalized.append(normalized_transcription)
             all_hyps.append(raw_prediction)
@@ -428,9 +432,12 @@ class FasterWhisperInference:
                 "normalized_transcription": normalized_transcription,
                 "raw_prediction": raw_prediction,
                 "normalized_prediction": None,
+                "duration": duration,
+                "inference_time": inference_time,
+                "rtf": inference_time / duration if (inference_time and duration > 0) else None,
             }
 
-        all_hyps_normalized = text_processing.StandardArabicTextProcessor.normalize_texts(all_hyps, substitute=True)
+        all_hyps_normalized = text_processing.StandardArabicTextProcessor.main(all_hyps, substitute=True)
         self._finalize_info(all_audio_paths=all_audio_paths, all_refs_normalized=all_refs_normalized, all_hyps_normalized=all_hyps_normalized)
         self._overall_metrics = metrics.BasicSTTMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
 
@@ -443,19 +450,16 @@ class FasterWhisperInference:
             records (list): List of audio records containing waveform, sample_rate, 
                           transcription, and audio_path
         """
-        all_refs_normalized = []
-        all_hyps = []
-        all_audio_paths = []
-
-        if not isinstance(records, list):
-            records = [records]
-
+        all_refs_normalized, all_hyps, all_audio_paths = [], [], []
+        if not isinstance(records, list): records = [records]
         for i, record in tqdm(enumerate(records), total=len(records), desc="Processing Records"):
             audio_path = record["audio_path"]
             transcription = record["transcription"]
             normalized_transcription = record["normalized_transcription"]
+            duration = record["audio_duration"]
             all_audio_paths.append(audio_path)
             try:
+                start_time = time.time()
                 # FasterWhisper handles long audios internally
                 segments, _ = self.pipeline.transcribe(
                     audio_path,
@@ -466,9 +470,19 @@ class FasterWhisperInference:
 
                 # Concatenate all segment texts
                 raw_prediction = " ".join([seg.text for seg in segments])
-
+                end_time = time.time()
+                
+                inference_time = end_time - start_time
+                
+                # Track timing (skip first 5 for warmup)
+                if self._processed_count > 4:
+                    self._total_inference_time += inference_time
+                    self._total_audio_duration += duration
+                
+                self._processed_count += 1
             except Exception as e:
                 LOGGER.error(f"⚠️ Sample {i+1}, Name: {audio_path}, failed: {e}")
+                inference_time = None
                 raw_prediction = ""
 
             all_refs_normalized.append(normalized_transcription)
@@ -478,9 +492,12 @@ class FasterWhisperInference:
                 "normalized_transcription": normalized_transcription,
                 "raw_prediction": raw_prediction,
                 "normalized_prediction": None,
+                "duration": duration,
+                "inference_time": inference_time,
+                "rtf": inference_time / duration if (inference_time and duration > 0) else None,
             }
 
-        all_hyps_normalized = text_processing.StandardArabicTextProcessor.normalize_texts(all_hyps, substitute=True)
+        all_hyps_normalized = text_processing.StandardArabicTextProcessor.main(all_hyps, substitute=True)
         self._finalize_info(all_audio_paths=all_audio_paths, all_refs_normalized=all_refs_normalized, all_hyps_normalized=all_hyps_normalized)
         self._overall_metrics = metrics.BasicSTTMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
 
@@ -504,43 +521,25 @@ class FasterWhisperInference:
                     self._samples_info[audio_path]["metrics"] = sample_metrics
                 except Exception as e:
                     LOGGER.error(f"Error processing sample {i+1}, Name: {audio_path}, failed: {e}")
-                    self._samples_info[audio_path]["metrics"] = {
-                        "word_error_rate": {
-                            "wer (%)": None,
-                            "substitutions": None,
-                            "deletions": None,
-                            "insertions": None,
-                            "hits": None,
-                        },
-                        "character_error_rate": {
-                            "cer (%)": None,
-                            "substitutions": None,
-                            "deletions": None,
-                            "insertions": None,
-                            "hits": None,
-                        },
-                    }
+                    self._samples_info[audio_path]["metrics"] = helpers._empty_metrics()
                     continue
             else:
                 self._samples_info[audio_path] = {
                     "normalized_prediction": None,
-                    "metrics": {
-                        "word_error_rate": {
-                            "wer (%)": None,
-                            "substitutions": None,
-                            "deletions": None,
-                            "insertions": None,
-                            "hits": None,
-                        },
-                        "character_error_rate": {
-                            "cer (%)": None,
-                            "substitutions": None,
-                            "deletions": None,
-                            "insertions": None,
-                            "hits": None,
-                        },
-                    },
+                    "metrics": helpers._empty_metrics()
                 }
+
+    def get_performance_summary(self):
+        """Return performance metrics dict"""
+        if self._total_audio_duration == 0:
+            return None
+        
+        return {
+            "average_rtf": self._total_inference_time / self._total_audio_duration if self._total_audio_duration > 0 else None,
+            "total_inference_time": self._total_inference_time,
+            "total_audio_duration": self._total_audio_duration,
+            "processed_samples": self._processed_count
+        }
 
     def summary_of_evaluation(self):
         """
@@ -553,11 +552,21 @@ class FasterWhisperInference:
         LOGGER.info("Overall Evaluation Summary:")
         for k, v in self._overall_metrics.items():
             LOGGER.info(f"{k}: {v}")
-
+        
+        # Add performance metrics
+        perf = self.get_performance_summary()
+        if perf:
+            LOGGER.info(f"Average RTF: {perf['average_rtf']:.4f}")
+            LOGGER.info(f"Total Inference Time: {perf['total_inference_time']:.2f}s")
+            LOGGER.info(f"Total Audio Duration: {perf['total_audio_duration']:.2f}s")
+            LOGGER.info(f"Processed Samples: {perf['processed_samples']}")
+            
     def reset(self):
         self._overall_metrics = None
         self._samples_info = {}
-
+        self._total_inference_time = 0.0
+        self._total_audio_duration = 0.0
+        self._processed_count = 0
         gc.collect()
         if self.device == "cuda":
             torch.cuda.empty_cache()

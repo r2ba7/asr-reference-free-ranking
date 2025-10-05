@@ -14,13 +14,15 @@ SUBSTITUTE_OBJ = substitute()
 ARABERT_OBJ = preprocess.ArabertPreprocessor(model_name="bert-base-arabertv2", apply_farasa_segmentation=True, insert_white_spaces=False)
 
 CHAR_MAPPING = {
-    'أ': 'ا',  # Replace أ with ا
+    'أ': 'ا',
     'إ': 'ا',
-    'آ': 'ا'
-    # Add more character mappings here as needed
-    # 'إ': 'ا',  # Example: Replace إ with ا
-    # 'آ': 'ا',  # Example: Replace آ with ا
-    }
+    'آ': 'ا',
+    'پ': 'ب',
+    'ڤ': 'ف',
+    'ؤ': 'و',
+    'ئ': 'ي',
+    'ء': ''
+}
 
 WORD_MAPPING = {
     'يئول': 'يقول',  # Example mapping
@@ -395,9 +397,14 @@ class StandardArabicTextProcessor:
     
     # Dictionary for normalizing Hamzas and Maddas
     CHAR_MAPPING = {
-        'أ': 'ا',  # Replace أ with ا
+        'أ': 'ا',
         'إ': 'ا',
-        'آ': 'ا'
+        'آ': 'ا',
+        'پ': 'ب',
+        'ڤ': 'ف',
+        'ؤ': 'و',
+        'ئ': 'ي',
+        'ء': ''
     }
     
     # Arabic diacritics to remove (Unicode points for common Arabic diacritics)
@@ -500,7 +507,7 @@ class StandardArabicTextProcessor:
         return [text.translate(StandardArabicTextProcessor.EASTERN_TO_WESTERN_NUM) for text in texts]
     
     @staticmethod
-    def normalize_hamzas_and_maddas(texts: List[str]) -> List[str]:
+    def normalize_characters(texts: List[str]) -> List[str]:
         """
         Normalize Hamzas and Maddas using the provided character mapping.
         
@@ -564,7 +571,7 @@ class StandardArabicTextProcessor:
         processed_texts = StandardArabicTextProcessor.transliterate_digits(processed_texts)
         processed_texts = StandardArabicTextProcessor.convert_numbers_to_arabic_text(processed_texts)
         # Step 5: Normalize Hamzas and Maddas
-        processed_texts = StandardArabicTextProcessor.normalize_hamzas_and_maddas(processed_texts)
+        processed_texts = StandardArabicTextProcessor.normalize_characters(processed_texts)
 
         # Step 6: Optional normalization of final letters (ى to ي, ة to ه)
         if normalize_final_letters:

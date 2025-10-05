@@ -57,7 +57,7 @@ class HybridEnsemble:
             return {}
 
         # Collect all unique audio paths
-        all_audio_paths = sorted({path for d in samples_dicts for path in d.keys()})[:1]
+        all_audio_paths = sorted({path for d in samples_dicts for path in d.keys()})
         # Build combined dict
         combined = {}
         for audio_path in all_audio_paths:
@@ -653,6 +653,18 @@ class HybridEnsemble:
                 data["metrics"] = helpers._empty_metrics()
 
         self._overall_metrics = metrics.BasicSTTMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
+
+    def summary_of_evaluation(self):
+        """
+        Display a simple summary of the overall evaluation metrics.
+        """
+        if not self._overall_metrics:
+            LOGGER.warning("No evaluation metrics available. Run inference first.")
+            return
+
+        LOGGER.info("Overall Evaluation Summary:")
+        for k, v in self._overall_metrics.items():
+            LOGGER.info(f"{k}: {v}")
 
     def reset(self):
         """

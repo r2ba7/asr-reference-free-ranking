@@ -60,9 +60,9 @@ def load_audio_transcripts(data_dir, sep, metadata_file_name="metadata.txt", **k
 
     # Bulk normalize all transcriptions at once
     if transcriptions:
-        LOGGER.info(f"Using substitute: {substitute}, Replace Final Char: {normalize_final_letters}")
         substitute = kwargs.get("substitute", False)
         normalize_final_letters = kwargs.get("normalize_final_letters", True)
+        LOGGER.info(f"Using substitute: {substitute}, Replace Final Char: {normalize_final_letters}")
         normalized_transcriptions = text_processing.StandardArabicTextProcessor.main(texts=transcriptions, normalize_final_letters=normalize_final_letters, substitute=substitute)
         for i, sample in enumerate(samples):
             sample["normalized_transcription"] = normalized_transcriptions[i]

@@ -148,52 +148,52 @@ class TokenReinforcer:
         
         def prompt_management(token_table: str, context_before: str | None = None, context_after: str | None = None) -> str:
             base_rules = """
-                أنت نظام تعزيز وتصحيح نصوص عربية لناتج التعرف التلقائي على الكلام (ASR).
-                مهمتك: بناء نص عربي صحيح لغوياً ونحوياً من الخيارات المتاحة.
+            You are an Arabic text reinforcement and correction system for ASR (Automatic Speech Recognition) outputs.
+            Task: produce a grammatically and linguistically correct Arabic text from the provided options.
 
-                مصطلحات:
-                - voted_token: الكلمة المتفق عليها بعد عملية التصويت (الخيار الأول في كل موضع).
-                - options: بدائل النماذج الأخرى. إن كانت فارغة → جميع النماذج متفقة على voted_token.
-                - استخدم JSON null (بدون علامات اقتباس) لتمثيل حذف/غياب كلمة.
+            Terms:
+            - voted_token: the consensus token after voting (the first option in each position).
+            - options: alternative tokens from other models. If empty → all models agreed.
+            - Use JSON null (without quotes) to represent deletion or absence.
 
-                قواعد ملزمة:
-                1. لكل موضع في token_table يجب أن تُعاد قيمة واحدة فقط: إما token (سلسلة) أو null.
-                2. لا تُغيّر ترتيب المواقع أو تُحذف موضعاً دون تعويض (كل موقع له قرار).
-                3. لا تُنشئ كلمات جديدة خارج الخيارات إلا في حالة **تصحيح تجميعي مقبول لغوياً** (مثل دمج 'كفر' + 'الشيخ' → 'كفرالشيخ') — هذا مسموح فقط عندما يكون واضحاً لغوياً.
-                4. الخيار الأول في كل موضع هو voted_token — فضّل الحفاظ عليه إذا كان صحيحاً لغوياً.
-                5. استخدم المعرفة السياقية (السياق قبل/بعد) عند الحاجة إذا الخيارات متقاربة.
-                6. يمكن إخراج null فقط عند وجود خطأ واضح أو تكرار أو عدم قابلية أي خيار للاستمرار.
-                7. لكل selection أعد أيضا حقل is_modified: true إذا اختفت الكلمة أو تغيّرت (أي إذا الاختيار ليس مساويًا لـ voted_token)، وإلا false.
-                8. أعِد أيضاً مجموعياً حقل is_modified (true/false) يبيّن إن حصل أي تعديل عبر المقطع.
+            Rules:
+            1. For each position in token_table, return exactly one value: either a string token or null.
+            2. Do not change order or remove positions.
+            3. Do not invent new words unless its a clear, linguistically valid merge.
+            4. The first item (voted_token) should be preferred if linguistically sound.
+            5. Use surrounding context (before/after) when options are close in meaning.
+            6. Use null only when the token is wrong, duplicated, or unfit.
+            7. Each output item must include "is_modified": true if the token was changed or removed, false otherwise.
+            8. Also include a global field "is_modified" indicating if any modification occurred.
 
-                الناتج المطلوب (صيغة JSON، استخدم null للغياب):
-                {
-                "selections":[
-                    {"position": 0, "token": "كلمة", "is_modified": false},
-                    {"position": 1, "token": null, "is_modified": true},
-                    ...
-                ],
-                "is_modified": true|false
-                }
+            Expected output (valid JSON, use null for missing tokens):
+            {
+            "selections": [
+                {"position": 0, "token": "word", "is_modified": false},
+                {"position": 1, "token": null, "is_modified": true},
+                ...
+            ],
+            }
 
-                مثال مبسّط:
-                token_table:
-                0: voted_token='كفر' | options=['كفرالشيخ', 'كفر الشيخ']
-                1: voted_token='الشيخ' | options=['Null']
+            Example:
+            token_table:
+            0: voted_token='كفر' | options=['كفرالشيخ', 'كفر الشيخ']
+            1: voted_token='الشيخ' | options=['Null']
 
-                مخرجات صالحة:
-                {
-                "selections":[
-                    {"position":0, "token":"كفرالشيخ", "is_modified": true},
-                    {"position":1, "token": null, "is_modified": true}
-                ],
-                "is_modified": true
-                }
-                """
-            if context_before is not None or context_after is not None:
-                return f"{base_rules}\n\nالسياق قبل المقطع:\n{context_before}\n\nالسياق بعد المقطع:\n{context_after}\n\nخيارات الكلمات:\n{token_table}\n"
-            else:
-                return f"{base_rules}\n\nخيارات الكلمات:\n{token_table}\n" 
+            Valid output:
+            {
+            "selections":[
+                {"position":0,"token":"كفرالشيخ","is_modified":true},
+                {"position":1,"token":null,"is_modified":true}
+            ],
+            }
+            """
+            if context_before or context_after:
+                return (
+                    f"{base_rules}\n\nContext before:\n{context_before}\n\n"
+                    f"Context after:\n{context_after}\n\nToken options:\n{token_table}\n"
+                )
+            return f"{base_rules}\n\nToken options:\n{token_table}\n"
                 
         prompt = prompt_management(token_table=token_table, context_before=context_before, context_after=context_after)
         try:
@@ -203,7 +203,6 @@ class TokenReinforcer:
                 response_format={
                     "type": "json_schema",
                     "json_schema": {
-                        "name": "ValidatedChunkResponse",
                         "strict": True,
                         "schema": {
                             "type": "object",
@@ -244,7 +243,6 @@ class TokenReinforcer:
     def main(self, fusion_tokens: List[str], candidate_tokens: List[List[str]], 
              max_tokens: int = 25, chunk_size: int = 15, overlap: int = 3) -> GeneratedResponse:
         is_chunked = self._chunk_needed(fusion_tokens=fusion_tokens, max_tokens=max_tokens)
-        LOGGER.info(f"is chunked: {is_chunked}")
         if is_chunked:
             chunked_data = self._prepare_chunked_operations(fusion_tokens, candidate_tokens, chunk_size, overlap)
             reinforced_results = self._reinforce_chunk(chunked_data)

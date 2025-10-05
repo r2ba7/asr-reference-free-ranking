@@ -10,7 +10,7 @@ import numpy as np
 from tqdm import tqdm
 
 from stt_benchmarking.utils import text_processing, helpers, metrics
-from stt_benchmarking.models.llms import openrouter_api
+from stt_benchmarking.models.llms import reinforcer
 from . import LOGGER
 
 class HybridEnsemble:
@@ -24,7 +24,7 @@ class HybridEnsemble:
         self._overall_metrics = None
 
     def initialize_llm(self):
-        self.REINFORCER = openrouter_api.TokenReinforcer()
+        self.REINFORCER = reinforcer.TokenReinforcer()
     
     @staticmethod
     def compute_weights(accuracies):
@@ -551,7 +551,7 @@ class HybridEnsemble:
         return voting_result
 
     def llm_reinforcer(self, fusion_tokens, candidates_tokens, max_tokens, chunk_size, overlap):
-        def postprocess_reinforced_output(response: openrouter_api.GeneratedResponse) -> Dict[str, Any]:
+        def postprocess_reinforced_output(response: reinforcer.GeneratedResponse) -> Dict[str, Any]:
             results = response.reinforced_results
             final_tokens = []
             modifications = 0

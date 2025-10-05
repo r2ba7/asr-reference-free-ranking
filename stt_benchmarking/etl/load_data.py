@@ -5,7 +5,7 @@ import torchaudio
 from stt_benchmarking.utils import text_processing
 from . import LOGGER
 
-def load_audio_transcripts(data_dir, sep, processing_level=0, metadata_file_name="metadata.txt", **kwargs):
+def load_audio_transcripts(data_dir, sep, metadata_file_name="metadata.txt", **kwargs):
     if not os.path.isdir(data_dir):
         raise FileNotFoundError(f"Directory '{data_dir}' does not exist.")
 
@@ -60,22 +60,11 @@ def load_audio_transcripts(data_dir, sep, processing_level=0, metadata_file_name
 
     # Bulk normalize all transcriptions at once
     if transcriptions:
-        if processing_level == 0:
-            LOGGER.info("Using BasicArabicTextProcessing")
-            processed_transcriptions = text_processing.BasicArabicTextProcessing.normalize_texts(texts=transcriptions)
-            for i, sample in enumerate(samples):
-                sample["normalized_transcription"] = processed_transcriptions[i]
-        elif processing_level == 1:
-            LOGGER.info("Using HeavyArabicTextProcessing")
-            processed_transcriptions = text_processing.HeavyArabicTextProcessing.process_texts(texts=transcriptions)
-            for i, sample in enumerate(samples):
-                sample["normalized_transcription"] = processed_transcriptions[i]
-        elif processing_level == 2:
-            LOGGER.info("Using StandardArabicTextProcessor")
-            substitute = kwargs.get("substitute", False)
-            LOGGER.info(f"Using substitute: {substitute}")
-            normalized_transcriptions = text_processing.StandardArabicTextProcessor.normalize_texts(texts=transcriptions, substitute=substitute)
-            for i, sample in enumerate(samples):
-                sample["normalized_transcription"] = normalized_transcriptions[i]
+        LOGGER.info(f"Using substitute: {substitute}, Replace Final Char: {normalize_final_letters}")
+        substitute = kwargs.get("substitute", False)
+        normalize_final_letters = kwargs.get("normalize_final_letters", True)
+        normalized_transcriptions = text_processing.StandardArabicTextProcessor.main(texts=transcriptions, normalize_final_letters=normalize_final_letters, substitute=substitute)
+        for i, sample in enumerate(samples):
+            sample["normalized_transcription"] = normalized_transcriptions[i]
 
     return samples

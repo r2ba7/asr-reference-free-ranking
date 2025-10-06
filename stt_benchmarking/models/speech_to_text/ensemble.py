@@ -134,14 +134,6 @@ class HybridEnsemble:
             success_ratio = successful_alignments / total_comparisons if total_comparisons > 0 else 1.0
             success = success_ratio >= 0.5
             return success, longest_reference, longest_original_index
-
-        def get_longest_reference_fallback(transcriptions):
-            valid_transcriptions = [(i, t) for i, t in enumerate(transcriptions) if t is not None]
-            if not valid_transcriptions:
-                return False, None, None
-            
-            longest_original_index, longest_reference = max(valid_transcriptions, key=lambda x: len(x[1]))
-            return True, longest_reference, longest_original_index
         
         def get_common_words_reference(transcriptions):
             """
@@ -178,6 +170,50 @@ class HybridEnsemble:
             
             return False, None, None
 
+        def get_longest_reference_fallback(transcriptions):
+            """
+            Fallback when anchor validation fails but we still need a reference.
+            Uses average pairwise similarity to find most representative transcription.
+            """
+            valid_transcriptions = [(i, t) for i, t in enumerate(transcriptions) if t is not None]
+            if not valid_transcriptions:
+                return False, None, None
+            
+            # Single transcription case
+            if len(valid_transcriptions) == 1:
+                return True, valid_transcriptions[0][1], valid_transcriptions[0][0]
+            
+            # Calculate average word-level edit distance for each transcription
+            best_avg_similarity = -1
+            best_reference = None
+            best_index = None
+            
+            for original_i, transcription_i in valid_transcriptions:
+                words_i = transcription_i.split()
+                total_similarity = 0.0
+                comparisons = 0
+                
+                for original_j, transcription_j in valid_transcriptions:
+                    if original_i != original_j:
+                        words_j = transcription_j.split()
+                        # Use SequenceMatcher for word-level similarity
+                        matcher = SequenceMatcher(None, words_i, words_j)
+                        total_similarity += matcher.ratio()
+                        comparisons += 1
+                
+                avg_similarity = total_similarity / comparisons if comparisons > 0 else 0.0
+                
+                # Tiebreaker: prefer longer transcription when similarity is equal
+                if avg_similarity > best_avg_similarity or \
+                (avg_similarity == best_avg_similarity and len(transcription_i) > len(best_reference or "")):
+                    best_avg_similarity = avg_similarity
+                    best_reference = transcription_i
+                    best_index = original_i
+            
+            # Success if we found reasonable consensus (>30% similarity)
+            success = best_avg_similarity >= 0.2
+            return success, best_reference, best_index
+        
         # Always ensure we have at least one valid transcription to return
         valid_transcriptions = [t for t in transcriptions if t is not None]
         if not valid_transcriptions:
@@ -186,13 +222,17 @@ class HybridEnsemble:
         longest_success, longest_reference, longest_index = get_longest_reference(transcriptions)
         if longest_success:
             return "longest", longest_reference, longest_index
+
+        common_words_success, common_words_reference, common_words_index = get_common_words_reference(transcriptions)
+        if common_words_success:
+            return "common_words", common_words_reference, common_words_index
+
+        fallback_success, fallback_reference, fallback_index = get_longest_reference_fallback(transcriptions)
+        if fallback_success:  # similarity >= 0.3
+            return "longest_fallback", fallback_reference, fallback_index
         else:
-            common_words_success, common_words_reference, common_words_index = get_common_words_reference(transcriptions)
-            if common_words_success:
-                return "common_words", common_words_reference, common_words_index
-            else:
-                _, longest_reference, longest_original_index = get_longest_reference(transcriptions)
-                return "longest_fallback", longest_reference, longest_original_index
+            # All strategies failed - transcriptions are incoherent
+            return "failed", fallback_reference, fallback_index 
 
     def align_transcriptions_to_reference(self, reference, reference_type, reference_index, transcriptions):
         """
@@ -258,84 +298,89 @@ class HybridEnsemble:
                 alignment_results.append(alignment_result)
             return alignment_results        
 
-        # Maybe needs small tweaking
         def align_with_common_words_strategy(reference, transcriptions, reference_index=reference_index, reference_type=reference_type):
+            """
+            Alignment strategy for consensus-based reference selection.
+            
+            Flow:
+            1. Reference Padding Phase:
+            - Start with the selected reference (most similar to all transcriptions)
+            - Compare reference against each other transcription using SequenceMatcher
+            - Identify all 'insert' operations (words present in transcriptions but missing in reference)
+            - Insert None placeholders at corresponding positions in reference
+            - Result: padded reference with None slots where other models have extra words
+            
+            2. Alignment Phase:
+            - For reference model: mark all original words as <KEEP>, None slots as <DELETE>
+            - For other models:
+                a. Align transcription words to padded reference using SequenceMatcher
+                b. Map operations:
+                    - 'equal': <KEEP> + copy word
+                    - 'replace': <REPLACE> + candidate word
+                    - 'delete': <DELETE> + None
+                    - 'insert': ignore (doesn't map to reference positions)
+                c. Store operations array and tokens array (aligned to padded reference length)
+            
+            3. Output:
+            - List of alignment_result dicts, one per model
+            - Each contains: model_index, reference_type, is_reference flag, operations, tokens
+            - All arrays have same length (padded reference length) for position-wise voting
+            
+            Purpose: Accommodate structural differences when no single transcription serves as clear anchor
+            """
             alignment_results = []
-            valid_transcriptions = [(i, t) for i, t in enumerate(transcriptions) if t is not None]
             ref_words = reference.split()
-            max_length = max(len(t.split()) for _, t in valid_transcriptions)
-            longest_idx, longest_trans = max(valid_transcriptions, key=lambda x: len(x[1].split()))
-            longest_words = longest_trans.split()
-            padded_transcriptions_words = {}
+            
+            # Pad reference by finding all unique insertion points from other transcriptions
             padded_ref_words = ref_words.copy()
+            insertion_map = {}  # Maps ref position -> list of words inserted before it
             for model_index, transcription in enumerate(transcriptions):
-                if model_index == longest_idx:
-                    padded_transcriptions_words[model_index] = longest_words
+                if model_index == reference_index or transcription is None:
                     continue
-
-                if model_index == reference_index:
-                    matcher = SequenceMatcher(None, longest_words, padded_ref_words)
-                    insert_positions = []
-                    for op, long_start, long_end, ref_start, ref_end in matcher.get_opcodes():
-                        if op == 'delete':
-                            for i in range(long_start, long_end):
-                                insert_positions.append((ref_start, longest_words[i]))
-                    for pos, _ in sorted(insert_positions, key=lambda x: x[0]):
-                        padded_ref_words.insert(pos, None)
-                    padded_ref_words = padded_ref_words[:max_length] if len(padded_ref_words) > max_length else padded_ref_words + [None] * (max_length - len(padded_ref_words))
-                    padded_transcriptions_words[model_index] = padded_ref_words
-                else:
-                    if transcription is None:
-                        continue
-                    else:
-                        transcription_words = transcription.split()
-                        matcher = SequenceMatcher(None, longest_words, transcription_words)
-                        insert_positions = []
-                        for op, long_start, long_end, ref_start, ref_end in matcher.get_opcodes():
-                            if op == 'delete':
-                                for i in range(long_start, long_end):
-                                    insert_positions.append((ref_start, longest_words[i]))
-                        for pos, _ in sorted(insert_positions, key=lambda x: x[0]):
-                            transcription_words.insert(pos, None)
-                        transcription_words = transcription_words[:max_length] if len(transcription_words) > max_length else transcription_words + [None] * (max_length - len(transcription_words))
-                        # Save padded transcription words
-                        padded_transcriptions_words[model_index] = transcription_words
-                        # transcriptions[model_index] = ' '.join([w for w in transcription_words if w is not None])
-
+                
+                trans_words = transcription.split()
+                matcher = SequenceMatcher(None, ref_words, trans_words)
+                for op, ref_start, ref_end, trans_start, trans_end in matcher.get_opcodes():
+                    if op == 'insert':
+                        # Words in transcription that don't exist in reference
+                        if ref_start not in insertion_map:
+                            insertion_map[ref_start] = []
+                        insertion_map[ref_start].extend(trans_words[trans_start:trans_end])
+            
+            # Build padded reference with None placeholders for insertions
+            final_ref = []
+            for i, word in enumerate(ref_words):
+                if i in insertion_map:
+                    final_ref.extend([None] * len(set(insertion_map[i])))  # Unique insertions only
+                final_ref.append(word)
+            if len(ref_words) in insertion_map:  # Trailing insertions
+                final_ref.extend([None] * len(set(insertion_map[len(ref_words)])))
+            
+            padded_ref_words = final_ref
             padded_ref_length = len(padded_ref_words)
-
-            # Step 2: Align all transcriptions to padded reference
-            inserted_words = {}
+            
+            # Align each transcription to padded reference
             for model_index, transcription in enumerate(transcriptions):
                 alignment_result = {
                     'model_index': model_index,
                     'reference_type': reference_type,
                     'is_reference': (model_index == reference_index)
                 }
+                
                 if model_index == reference_index:
-                    alignment_result['operations'] = ["<KEEP>"] * padded_ref_length
+                    alignment_result['operations'] = ["<KEEP>" if w is not None else "<DELETE>" for w in padded_ref_words]
                     alignment_result['tokens'] = padded_ref_words.copy()
                 else:
-                    if model_index in padded_transcriptions_words:
-                        trans_words = padded_transcriptions_words[model_index]
-                    else:
-                        trans_words = []
-
-                    if not trans_words:
+                    if not transcription:
                         alignment_result['operations'] = ["<DELETE>"] * padded_ref_length
                         alignment_result['tokens'] = [None] * padded_ref_length
                     else:
+                        trans_words = transcription.split()
                         operations = ["<DELETE>"] * padded_ref_length
                         tokens = [None] * padded_ref_length
+                        
                         matcher = SequenceMatcher(None, padded_ref_words, trans_words)
-                        inserted_words[model_index] = []
                         for op, ref_start, ref_end, trans_start, trans_end in matcher.get_opcodes():
-                            # ref_text = padded_ref_words[ref_start:ref_end]
-                            # trans_text = trans_words[trans_start:trans_end]
-
-                            # print(f"{op.upper():<9} | "
-                            #     f"ref[{ref_start}:{ref_end}] = '{ref_text}' | "
-                            #     f"trans[{trans_start}:{trans_end}] = '{trans_text}'")
                             if op == 'equal':
                                 for i in range(ref_start, ref_end):
                                     operations[i] = "<KEEP>"
@@ -346,23 +391,105 @@ class HybridEnsemble:
                                     trans_idx = trans_start + (i - ref_start)
                                     if trans_idx < trans_end:
                                         tokens[i] = trans_words[trans_idx]
-                                    else:
-                                        tokens[i] = None
                             elif op == 'delete':
                                 for i in range(ref_start, ref_end):
                                     operations[i] = "<DELETE>"
-                                    tokens[i] = None
                             elif op == 'insert':
-                                inserted_words[model_index].extend(trans_words[trans_start:trans_end])
+                                pass  # Insertions don't map to reference positions
+                        
                         alignment_result['operations'] = operations
                         alignment_result['tokens'] = tokens
-                    # print("--------------")
+                
                 alignment_results.append(alignment_result)
-
+            
             return alignment_results
         
-        def align_with_longest_fallback_strategy(weights, reference, transcriptions, reference_index=reference_index, reference_type=reference_type):
-            pass
+        def align_with_longest_fallback_strategy(reference, transcriptions, reference_index=reference_index, reference_type=reference_type):
+            """
+            Fallback alignment when anchor validation fails.
+            
+            Flow:
+            1. Compute pairwise similarity matrix for all valid transcriptions
+            2. Calculate reliability weight for each model (average similarity to others)
+            3. Perform standard word-level alignment (same as longest strategy)
+            4. Attach weight metadata to each alignment result for downstream use
+            
+            Difference from longest strategy:
+            - Longest: High anchor confidence, reference is structural authority
+            - Fallback: Low anchor confidence, reference is "best guess", weights signal reliability
+            
+            Output: Same structure as longest strategy + 'weight' field per model
+            Purpose: Enable weighted voting in consensus step when reference quality is uncertain
+            """
+            alignment_results = []
+            valid_transcriptions = [(i, t) for i, t in enumerate(transcriptions) if t and t.strip()]
+            
+            if len(valid_transcriptions) <= 1:
+                # Degenerate case: use simple alignment without weights
+                return align_with_longest_strategy(reference, transcriptions, reference_index, reference_type)
+            
+            # Calculate pairwise similarities
+            model_weights = {}
+            for i, trans_i in valid_transcriptions:
+                words_i = trans_i.split()
+                total_sim = 0.0
+                comparisons = 0
+                for j, trans_j in valid_transcriptions:
+                    if i != j:
+                        words_j = trans_j.split()
+                        total_sim += SequenceMatcher(None, words_i, words_j).ratio()
+                        comparisons += 1
+                model_weights[i] = total_sim / comparisons if comparisons > 0 else 0.0
+            
+            # Normalize weights to [0, 1]
+            max_weight = max(model_weights.values()) if model_weights else 1.0
+            if max_weight > 0:
+                model_weights = {k: v / max_weight for k, v in model_weights.items()}
+            
+            # Perform standard alignment
+            ref_words = reference.split()
+            for model_index, transcription in enumerate(transcriptions):
+                alignment_result = {
+                    'model_index': model_index,
+                    'reference_type': reference_type,
+                    'is_reference': (model_index == reference_index),
+                    'weight': model_weights.get(model_index, 0.0)  # Reliability score
+                }
+                
+                if model_index == reference_index:
+                    alignment_result['operations'] = ["<KEEP>"] * len(ref_words)
+                    alignment_result['tokens'] = ref_words.copy()
+                else:
+                    if not transcription or not transcription.strip():
+                        alignment_result['operations'] = ["<DELETE>"] * len(ref_words)
+                        alignment_result['tokens'] = [None] * len(ref_words)
+                    else:
+                        trans_words = transcription.split()
+                        operations = ["<DELETE>"] * len(ref_words)
+                        candidate_values = [None] * len(ref_words)
+                        
+                        matcher = SequenceMatcher(None, ref_words, trans_words)
+                        for op, ref_start, ref_end, trans_start, trans_end in matcher.get_opcodes():
+                            if op == 'equal':
+                                for i in range(ref_start, ref_end):
+                                    operations[i] = "<KEEP>"
+                                    candidate_values[i] = ref_words[i]
+                            elif op == 'replace':
+                                for i in range(ref_start, ref_end):
+                                    operations[i] = "<REPLACE>"
+                                    trans_idx = trans_start + (i - ref_start)
+                                    if trans_idx < trans_end:
+                                        candidate_values[i] = trans_words[trans_idx]
+                            elif op == 'delete':
+                                for i in range(ref_start, ref_end):
+                                    operations[i] = "<DELETE>"
+                        
+                        alignment_result['operations'] = operations
+                        alignment_result['tokens'] = candidate_values
+                
+                alignment_results.append(alignment_result)
+            
+            return alignment_results
         
         if reference is None or not transcriptions:
             return []
@@ -370,8 +497,10 @@ class HybridEnsemble:
             alignment_results = align_with_longest_strategy(reference=reference, transcriptions=transcriptions, reference_index=reference_index, reference_type=reference_type)
         elif reference_type == "common_words":
             alignment_results = align_with_common_words_strategy(reference=reference, transcriptions=transcriptions, reference_index=reference_index, reference_type=reference_type)
-        else: # Handle it later
-            alignment_results = align_with_longest_strategy(reference=reference, transcriptions=transcriptions, reference_index=reference_index, reference_type=reference_type)
+        elif reference_type == "longest_fallback":
+            alignment_results = align_with_longest_fallback_strategy(reference=reference, transcriptions=transcriptions, reference_index=reference_index, reference_type=reference_type)
+        elif reference_type == "failed":
+            alignment_results = align_with_longest_fallback_strategy(reference=reference, transcriptions=transcriptions, reference_index=reference_index, reference_type=reference_type)
         return alignment_results
     
     def voting_scheme(self, audio_path, alignment_results):

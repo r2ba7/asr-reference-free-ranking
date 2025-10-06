@@ -21,10 +21,10 @@ class FastConformerInference:
         Args:
             device (str or torch.device): Device to run the model on ('cuda' or 'cpu')
         """
-        self.model = self._load_model()
         self._overall_metrics = None
         self._samples_info = {}
         self.device = torch.device(device)
+        self.model = self._load_model()
         # Add timing/memory tracking
         self._total_inference_time = 0.0
         self._total_audio_duration = 0.0
@@ -50,7 +50,7 @@ class FastConformerInference:
             records (list): List of audio records containing waveform, sample_rate, 
                           transcription, and audio_path
         """
-        all_refs_normalized, all_hyps, all_audio_paths = [], [], []
+        all_audio_paths = []
         if not isinstance(records, list): records = [records]
         for i, record in tqdm(enumerate(records), total=len(records), desc="Processing Records"):
             audio_path = record['audio_path']
@@ -61,12 +61,10 @@ class FastConformerInference:
             try:
                 # Time inference
                 start_time = time.time()
-                output = self.model.transcribe([audio_path], verbose=False, batch_size=64)
+                with torch.no_grad():
+                    output = self.model.transcribe([audio_path], verbose=False, batch_size=64)
                 raw_prediction = output[0].text
-                end_time = time.time()
-                
-                inference_time = end_time - start_time
-                
+                inference_time = time.time() - start_time
                 # Track timing (skip first 5 for warmup)
                 if self._processed_count > 4:
                     self._total_inference_time += inference_time
@@ -79,8 +77,6 @@ class FastConformerInference:
                 inference_time = None
                 raw_prediction = ""
 
-            all_refs_normalized.append(normalized_transcription)
-            all_hyps.append(raw_prediction)
             self._samples_info[audio_path] = {
                 "raw_transcription": transcription,
                 "normalized_transcription": normalized_transcription,
@@ -91,11 +87,9 @@ class FastConformerInference:
                 "rtf": inference_time / duration if (inference_time and duration > 0) else None,
             }
                 
-        all_hyps_normalized = text_processing.StandardArabicTextProcessor.main(all_hyps, substitute=True)
-        self._finalize_info(all_audio_paths=all_audio_paths, all_refs_normalized=all_refs_normalized, all_hyps_normalized=all_hyps_normalized)
-        self._overall_metrics = metrics.BasicSTTMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
-
-    def _finalize_info(self, all_audio_paths, all_refs_normalized, all_hyps_normalized):
+        self._finalize_info(all_audio_paths=all_audio_paths)
+        
+    def _finalize_info(self, all_audio_paths):
         """
         Finalize predictions by normalizing them and computing metrics for each sample.
 
@@ -107,21 +101,28 @@ class FastConformerInference:
         for i, audio_path in enumerate(all_audio_paths):
             if audio_path in self._samples_info:
                 try:
-                    self._samples_info[audio_path]["normalized_prediction"] = all_hyps_normalized[i]
+                    prediction = self._samples_info[audio_path]["raw_prediction"]
+                    self._samples_info[audio_path]["normalized_prediction"] = text_processing.StandardArabicTextProcessor.main(prediction, substitute=True)
                     sample_metrics = metrics.BasicSTTMetrics.evaluate(
-                        refs=all_refs_normalized[i],
-                        hyps=all_hyps_normalized[i],
+                        refs=self._samples_info[audio_path]["normalized_transcription"],
+                        hyps=self._samples_info[audio_path]["normalized_prediction"],
                     )
                     self._samples_info[audio_path]["metrics"] = sample_metrics
                 except Exception as e:
                     LOGGER.error(f"Error processing sample {i+1}, Name: {audio_path}, failed: {e}")
-                    self._samples_info[audio_path]["metrics"] = helpers._empty_metrics()
-                    continue
+                    self._samples_info[audio_path] = {
+                        "normalized_prediction": None,
+                        "metrics":  helpers._empty_metrics()
+                    }
             else:
                 self._samples_info[audio_path] = {
                     "normalized_prediction": None,
                     "metrics":  helpers._empty_metrics()
                 }
+
+        refs = [v["normalized_transcription"] for v in self._samples_info.values()]
+        hyps = [v["normalized_prediction"] for v in self._samples_info.values()]
+        self._overall_metrics = metrics.BasicSTTMetrics.evaluate(refs=refs, hyps=hyps)
                 
     def get_performance_summary(self):
         """Return performance metrics dict"""

@@ -410,7 +410,7 @@ class HybridEnsemble:
             max_count = operation_counts.most_common(1)[0][1]
             tied_operations = [op for op, count in operation_counts.items() if count == max_count]
             if len(tied_operations) > 1:
-                priority_order = ["<REPLACE>", "<DELETE>", "<KEEP>", "<SKIP>", "<INSERT>"]
+                priority_order = ["<KEEP>", "<REPLACE>", "<DELETE>", "<SKIP>", "<INSERT>"]
                 for preferred_op in priority_order:
                     if preferred_op in tied_operations:
                         majority_operation = preferred_op
@@ -621,38 +621,44 @@ class HybridEnsemble:
 
     def eval(self, audios_chunk):
         def _eval_common(data):
-            return data.get("fusion_transcript")
+            return data["fusion_transcript"]
 
         def _eval_llm(data):
-            llm_resp = data.get("llm_response", {})
-            return llm_resp.get("final_transcript")
+            llm_resp = data["fusion_transcript"]
+            return llm_resp["final_transcript"]
 
         refs_lookup = {sample["audio_path"]: sample["normalized_transcription"] for sample in audios_chunk}
-        all_refs_normalized = []
-        all_hyps_normalized = []
-        for audio_path, data in self._fusion_results.items():
-            norm_transcript = _eval_llm(data) if self.use_llm else _eval_common(data)
-            data["normalized_prediction"] = text_processing.StandardArabicTextProcessor.main(
-                norm_transcript, substitute=True
-            )
-            ref = refs_lookup.get(audio_path)
-
-            if ref is not None:
-                data["normalized_transcription"] = ref
+        all_audio_paths = list(self._fusion_results.keys())
+        for i, audio_path in enumerate(all_audio_paths):
+            if audio_path in self._fusion_results:
                 try:
-                    sample_metrics = metrics.BasicSTTMetrics.evaluate(refs=ref, hyps=norm_transcript)
-                    data["metrics"] = sample_metrics
-                    all_refs_normalized.append(ref)
-                    all_hyps_normalized.append(norm_transcript)
-                except Exception as e:
-                    LOGGER.error(f"Metric calc failed for {audio_path}: {e}")
-                    data["metrics"] = helpers._empty_metrics()
-            else:
-                LOGGER.warning(f"No reference transcription found for {audio_path}")
-                data["normalized_transcription"] = None
-                data["metrics"] = helpers._empty_metrics()
+                    ref = refs_lookup.get(audio_path)
+                    hyp = _eval_llm(self._fusion_results[audio_path]) if self.use_llm else _eval_common(self._fusion_results[audio_path])
+                    self._fusion_results[audio_path]["normalized_prediction"] = text_processing.StandardArabicTextProcessor.main(hyp, substitute=True)
+                    self._fusion_results[audio_path]["normalized_transcription"] = ref
+                    if ref is not None:
+                        norm_hyp = self._fusion_results[audio_path]["normalized_prediction"]
+                        sample_metrics = metrics.BasicSTTMetrics.evaluate(refs=ref, hyps=norm_hyp)
+                        self._fusion_results[audio_path]["metrics"] = sample_metrics
+                    else:
+                        self._fusion_results[audio_path]["metrics"] = helpers._empty_metrics()
 
-        self._overall_metrics = metrics.BasicSTTMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
+                except Exception as e:
+                    LOGGER.error(f"Error processing sample {i+1}, Name: {audio_path}, failed: {e}")
+                    self._fusion_results[audio_path] = {
+                        "normalized_prediction": None,
+                        "metrics": helpers._empty_metrics()
+                    }
+            else:
+                self._fusion_results[audio_path] = {
+                    "normalized_prediction": None,
+                    "metrics": helpers._empty_metrics()
+                }
+
+        # Compute overall metrics
+        refs = [v["normalized_transcription"] for v in self._fusion_results.values()]
+        hyps = [v["normalized_prediction"] for v in self._fusion_results.values()]
+        self._overall_metrics = metrics.BasicSTTMetrics.evaluate(refs=refs, hyps=hyps)
 
     def summary_of_evaluation(self):
         """

@@ -112,7 +112,7 @@ class SeamlessM4TFullInterface:
                         transcription, and audio_path
             language_ids (list): List of language IDs to evaluate for each sample
         """
-        all_refs_normalized, all_hyps, all_audio_paths = [], [], []
+        all_audio_paths = []
         if not isinstance(records, list): records = [records]    
         for i, record in tqdm(enumerate(records), total=len(records), desc="Processing Records"):
             waveform = record["waveform"]
@@ -123,29 +123,21 @@ class SeamlessM4TFullInterface:
             all_audio_paths.append(audio_path)
             try:
                 start_time = time.time()
+                best_prediction = None
+                best_wer = float('inf')
                 inputs = self.processor(
                     audios=waveform,
                     sampling_rate=record['sample_rate'],
                     return_tensors="pt"
                 ).to(self.device, dtype=self.dtype)
-                
-                best_prediction = None
-                best_wer = float('inf')
-                best_lang = None
-                
                 for lang_id in language_ids:
-                    with torch.no_grad():
-                        output = self.model.generate(**inputs, generate_speech=False, tgt_lang=lang_id)[0]
-                    candidate = self.processor.decode(output[0], skip_special_tokens=True)
-                    candidate_normalized = text_processing.StandardArabicTextProcessor.main([candidate], substitute=True)[0]
-                    sample_wer = metrics.BasicSTTMetrics.evaluate(
-                        refs=normalized_transcription,
-                        hyps=candidate_normalized
-                    )["word_error_rate"]["wer (%)"]
-                    
+                    output_tokens = self.model.generate(**inputs, tgt_lang=lang_id) 
+                    raw_prediction = self.processor.decode(output_tokens[0], skip_special_tokens=True)
+                    candidate_normalized = text_processing.StandardArabicTextProcessor.main(raw_prediction, substitute=True)
+                    sample_wer = metrics.BasicSTTMetrics.evaluate(refs=normalized_transcription, hyps=candidate_normalized)["word_error_rate"]["wer (%)"]
                     if sample_wer < best_wer:
                         best_wer = sample_wer
-                        best_prediction = candidate
+                        best_prediction = raw_prediction
                 
                 raw_prediction = best_prediction
                 inference_time = time.time() - start_time
@@ -159,8 +151,6 @@ class SeamlessM4TFullInterface:
                 inference_time = None
                 raw_prediction = ""
 
-            all_refs_normalized.append(normalized_transcription)
-            all_hyps.append(raw_prediction)
             self._samples_info[audio_path] = {
                 "raw_transcription": transcription,
                 "normalized_transcription": normalized_transcription,
@@ -171,8 +161,7 @@ class SeamlessM4TFullInterface:
                 "rtf": inference_time / duration if (inference_time and duration > 0) else None,
             }
 
-        all_hyps_normalized = text_processing.StandardArabicTextProcessor.main(all_hyps, substitute=True)
-        self._finalize_info(all_audio_paths=all_audio_paths, all_refs_normalized=all_refs_normalized, all_hyps_normalized=all_hyps_normalized)
+        self._finalize_info(all_audio_paths=all_audio_paths)
     
     @decorators.Decorators.calculate_execution_time
     def run_batch_inference(self, records,):
@@ -215,8 +204,6 @@ class SeamlessM4TFullInterface:
                     return {"predictions": ["" for _ in batch_audio]}
         
         processed_records = []
-        all_refs_normalized = []
-        all_hyps = []
         all_audio_paths = []
         for record in records:
             waveform = record["waveform"]
@@ -261,10 +248,7 @@ class SeamlessM4TFullInterface:
             dataset["audio_path"], dataset["transcription"], dataset["normalized_transcription"], 
             dataset["predictions"], dataset["duration"]
         )):
-            all_refs_normalized.append(normalized_transcription)
-            all_hyps.append(prediction)
             all_audio_paths.append(audio_path)
-            
             sample_rtf = (batch_inference_time / len(records)) / duration if duration > 0 else None
             self._samples_info[audio_path] = {
                 "raw_transcription": transcription,
@@ -276,8 +260,7 @@ class SeamlessM4TFullInterface:
                 "rtf": sample_rtf,
             }
 
-        all_hyps_normalized = text_processing.StandardArabicTextProcessor.main(all_hyps, substitute=True)
-        self._finalize_info(all_audio_paths=all_audio_paths, all_refs_normalized=all_refs_normalized, all_hyps_normalized=all_hyps_normalized)
+        self._finalize_info(all_audio_paths=all_audio_paths)
 
     @decorators.Decorators.calculate_execution_time
     def run_inference_optimized(self, records, language_ids=["arb", "ary", "arz"], duration_threshold=30.0):
@@ -303,13 +286,11 @@ class SeamlessM4TFullInterface:
             LOGGER.info(f"Running batch inference on {len(long_records)} long files (≥{duration_threshold}s)")
             self.run_batch_inference(long_records, language_ids)
 
-        refs = [self._samples_info[r["audio_path"]]["normalized_transcription"] 
-                for r in records if r["audio_path"] in self._samples_info]
-        hyps = [self._samples_info[r["audio_path"]]["normalized_prediction"] 
-                for r in records if r["audio_path"] in self._samples_info]
+        refs = [v["normalized_transcription"] for v in self._samples_info.values()]
+        hyps = [v["normalized_prediction"] for v in self._samples_info.values()]
         self._overall_metrics = metrics.BasicSTTMetrics.evaluate(refs=refs, hyps=hyps)
 
-    def _finalize_info(self, all_audio_paths, all_refs_normalized, all_hyps_normalized):
+    def _finalize_info(self, all_audio_paths):
         """
         Finalize predictions by normalizing them and computing metrics for each sample.
 
@@ -321,20 +302,23 @@ class SeamlessM4TFullInterface:
         for i, audio_path in enumerate(all_audio_paths):
             if audio_path in self._samples_info:
                 try:
-                    self._samples_info[audio_path]["normalized_prediction"] = all_hyps_normalized[i]
+                    prediction = self._samples_info[audio_path]["raw_prediction"]
+                    self._samples_info[audio_path]["normalized_prediction"] = text_processing.StandardArabicTextProcessor.main(prediction, substitute=True)
                     sample_metrics = metrics.BasicSTTMetrics.evaluate(
-                        refs=all_refs_normalized[i],
-                        hyps=all_hyps_normalized[i],
+                        refs=self._samples_info[audio_path]["normalized_transcription"],
+                        hyps=self._samples_info[audio_path]["normalized_prediction"],
                     )
                     self._samples_info[audio_path]["metrics"] = sample_metrics
                 except Exception as e:
                     LOGGER.error(f"Error processing sample {i+1}, Name: {audio_path}, failed: {e}")
-                    self._samples_info[audio_path]["metrics"] = helpers._empty_metrics()
-                    continue
+                    self._samples_info[audio_path] = {
+                        "normalized_prediction": None,
+                        "metrics":  helpers._empty_metrics()
+                    }
             else:
                 self._samples_info[audio_path] = {
                     "normalized_prediction": None,
-                    "metrics": helpers._empty_metrics()
+                    "metrics":  helpers._empty_metrics()
                 }
 
     def get_performance_summary(self):

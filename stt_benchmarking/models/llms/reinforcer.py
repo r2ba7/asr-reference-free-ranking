@@ -24,7 +24,7 @@ class TokenReinforcer:
     )
     
     def __init__(self):
-        print(21)
+        print(26)
 
     def _process_chunks(
         self, fusion_tokens: List[str], candidate_tokens: List[List[str]], 
@@ -33,7 +33,6 @@ class TokenReinforcer:
         adjusted_tokens = {}  # Use dict keyed by position for deduplication
         any_modification = False
         start_idx = 0
-        
         while start_idx < len(fusion_tokens):
             end_idx = min(start_idx + chunk_size, len(fusion_tokens))
             chunk_tokens, chunk_modified = self._validate_chunk(
@@ -69,15 +68,17 @@ class TokenReinforcer:
         formatted = []
         num_models = len(candidate_tokens)
         for idx in range(start_idx, min(end_idx, len(fusion_tokens))):
-            options = {fusion_tokens[idx]}
             fusion_tok = fusion_tokens[idx]
+            fusion_tok_str = "null" if fusion_tok is None else fusion_tok
             options = []
             for m in range(num_models):
                 if idx < len(candidate_tokens[m]):
-                    tok = candidate_tokens[m][idx] or "Null"
-                    if tok != fusion_tok:
-                        options.append(tok)
-            formatted.append(f"{idx}: voted_token='{fusion_tok}' | options={options}")
+                    tok = candidate_tokens[m][idx]
+                    tok_str = "null" if tok is None else tok
+                    if tok_str != fusion_tok_str:
+                        options.append(tok_str)
+
+            formatted.append(f"{idx}: voted_token='{fusion_tok_str}' | options={options}")
         return "\n".join(formatted)
     
     def _prepare_chunked_operations(self, fusion_tokens, candidate_tokens, chunk_size, overlap):
@@ -148,54 +149,111 @@ class TokenReinforcer:
         
         def prompt_management(token_table: str, context_before: str | None = None, context_after: str | None = None) -> str:
             base_rules = """
-            You are an Arabic text reinforcement and correction system for ASR (Automatic Speech Recognition) outputs.
-            Task: produce a grammatically and linguistically correct Arabic text from the provided options.
+            You are an Arabic text reinforcement system for ASR ensemble outputs.
+            Your task: select the most linguistically correct token at each position from the provided candidates.
 
-            Terms:
-            - voted_token: the consensus token after voting (the first option in each position).
-            - options: alternative tokens from other models. If empty → all models agreed.
-            - Use JSON null (without quotes) to represent deletion or absence.
+            Definitions:
+            - voted_token: consensus token from majority voting (primary candidate)
+            - options: alternative tokens from minority models
+            - JSON null (no quotes): represents token deletion/absence
 
-            Rules:
-            1. For each position in token_table, return exactly one value: either a string token or null.
-            2. Do not change order or remove positions.
-            3. Do not invent new words unless its a clear, linguistically valid merge.
-            4. The first item (voted_token) should be preferred if linguistically sound.
-            5. Use surrounding context (before/after) when options are close in meaning.
-            6. Use null only when the token is wrong, duplicated, or unfit.
-            7. Each output item must include "is_modified": true if the token was changed or removed, false otherwise.
-            8. Also include a global field "is_modified" indicating if any modification occurred.
+            Critical constraints:
+            1. Output EXACTLY one entry per input position — no more, no less
+            2. Each entry format: {"idx": N, "token": "string" OR null, "is_modified": true/false}
+            3. is_modified=true ONLY if you changed voted_token or set it to null
+            4. is_modified=false if you kept voted_token unchanged
+            5. NEVER create new words not present in voted_token or options
+            6. NEVER merge tokens unless the merge candidate exists verbatim in options
+            7. Use null ONLY when voted_token is linguistically invalid AND no valid option exists
+            8. Preserve position indices exactly as given (0, 1, 2, ... N-1)
+            9. Output must be valid JSON with no trailing commas
 
-            Expected output (valid JSON, use null for missing tokens):
+            Token selection priority:
+            a) If voted_token is grammatically valid in context → keep it (is_modified=false)
+            b) If voted_token is invalid but an option is valid → select that option (is_modified=true)
+            c) If all candidates are invalid → use null (is_modified=true)
+
+            Context usage:
+            - Use context_before and context_after to resolve ambiguity between similar options
+            - Do NOT use context to justify inventing tokens
+
+            Output format:
             {
             "selections": [
-                {"position": 0, "token": "word", "is_modified": false},
-                {"position": 1, "token": null, "is_modified": true},
-                ...
-            ],
+                {"idx": 0, "token": "word1", "is_modified": false},
+                {"idx": 1, "token": null, "is_modified": true},
+                {"idx": 2, "token": "word2", "is_modified": true}
+            ]
             }
 
             Example:
             token_table:
             0: voted_token='كفر' | options=['كفرالشيخ', 'كفر الشيخ']
-            1: voted_token='الشيخ' | options=['Null']
+            1: voted_token='الشيخ' | options=[null]
 
-            Valid output:
+            Correct output (merge exists in options):
             {
-            "selections":[
-                {"position":0,"token":"كفرالشيخ","is_modified":true},
-                {"position":1,"token":null,"is_modified":true}
-            ],
+            "selections": [
+                {"idx": 0, "token": "كفرالشيخ", "is_modified": true},
+                {"idx": 1, "token": null, "is_modified": true}
+            ]
+            }
+
+            Incorrect output (inventing new token):
+            {
+            "selections": [
+                {"idx": 0, "token": "كفر_الشيخ", "is_modified": true}  ← WRONG: invented token
+            ]
             }
             """
+            #             base_rules = """
+            # You are an Arabic text reinforcement system for ASR ensemble outputs.
+            # Your task: select the most linguistically correct token at each position from the provided candidates, and apply grammatical corrections where necessary.
+
+            # Definitions:
+            # - voted_token: consensus token from majority voting (primary candidate)
+            # - options: alternative tokens from minority models
+            # - JSON null (no quotes): represents token deletion/absence
+
+            # Critical constraints:
+            # 1. Output EXACTLY one entry per input position — no more, no less.
+            # 2. Each entry format: {"idx": N, "token": "string" OR null, "is_modified": true/false, "correction_details": "description" OR null}.
+            # 3. is_modified=true ONLY if you changed the voted_token (selected an option, corrected it, or set it to null).
+            # 4. is_modified=false if you kept voted_token unchanged.
+            # 5. **Correction Rule: You may generate a new word ONLY if it is a direct grammatical correction of a candidate (voted_token or an option). Corrections are limited to verb conjugations, gender/number agreement, or tense adjustments. You must justify this change in the "correction_details" field. Do not invent unrelated words.**
+            # 6. NEVER merge tokens unless the merge candidate exists verbatim in options.
+            # 7. Use null ONLY when voted_token is linguistically invalid, no valid option exists, AND no direct grammatical correction is possible.
+            # 8. Preserve position indices exactly as given (0, 1, 2, ... N-1).
+            # 9. Output must be valid JSON with no trailing commas.
+
+            # Token selection priority:
+            # a) If voted_token is grammatically valid in context → keep it (is_modified=false).
+            # b) If voted_token is invalid but an option is valid → select that option (is_modified=true).
+            # c) **If all candidates are grammatically invalid but one can be corrected → apply the correction (is_modified=true) and explain in "correction_details".**
+            # d) If all candidates are invalid and cannot be corrected → use null (is_modified=true).
+
+            # Context usage:
+            # - Use context_before and context_after to resolve ambiguity and justify corrections.
+            # - Do NOT use context to justify inventing unrelated tokens.
+
+            # Output format:
+            # {
+            # "selections": [
+            #     {"idx": 0, "token": "word1", "is_modified": false, "correction_details": null},
+            #     {"idx": 1, "token": null, "is_modified": true, "correction_details": "Token deleted as it was grammatically incorrect and had no valid alternatives."},
+            #     {"idx": 2, "token": "corrected_word", "is_modified": true, "correction_details": "Corrected verb conjugation from 'اتصل' to 'تصل' to match the feminine subject 'كادت'."}
+            # ]
+            # }
+            # """
             if context_before or context_after:
                 return (
                     f"{base_rules}\n\nContext before:\n{context_before}\n\n"
-                    f"Context after:\n{context_after}\n\nToken options:\n{token_table}\n"
+                    f"Context after:\n{context_after}\n\ntoken_table:\n{token_table}\n"
                 )
-            return f"{base_rules}\n\nToken options:\n{token_table}\n"
+            return f"{base_rules}\n\ntoken_table:\n{token_table}\n"
                 
         prompt = prompt_management(token_table=token_table, context_before=context_before, context_after=context_after)
+        print(prompt)
         try:
             completion = self.CLIENT.chat.completions.create(
                 model="google/gemini-2.5-flash",
@@ -203,6 +261,7 @@ class TokenReinforcer:
                 response_format={
                     "type": "json_schema",
                     "json_schema": {
+                        "name": "FusionReinforcer",
                         "strict": True,
                         "schema": {
                             "type": "object",
@@ -216,11 +275,13 @@ class TokenReinforcer:
                                             "token": {"type": ["string", "null"]},
                                             "is_modified": {"type": "boolean"}
                                         },
-                                        "required": ["idx", "token", "is_modified"]
+                                        "required": ["idx", "token", "is_modified"],
+                                        "additionalProperties": False
                                     }
                                 }
                             },
                             "required": ["selections"],
+                            "additionalProperties": False
                         },
                     },
                 },

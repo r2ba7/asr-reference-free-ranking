@@ -753,8 +753,7 @@ class HybridEnsemble:
             return data["fusion_transcript"]
 
         def _eval_llm(data):
-            llm_resp = data["fusion_transcript"]
-            return llm_resp["final_transcript"]
+            return data["llm_response"]["final_transcript"]
 
         refs_lookup = {sample["audio_path"]: sample["normalized_transcription"] for sample in audios_chunk}
         all_audio_paths = list(self._fusion_results.keys())

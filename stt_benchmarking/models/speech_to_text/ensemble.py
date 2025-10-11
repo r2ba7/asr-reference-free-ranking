@@ -5,6 +5,7 @@ from collections import Counter, OrderedDict
 import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Any
+import time
 
 import numpy as np
 from tqdm import tqdm
@@ -58,6 +59,39 @@ class HybridEnsemble:
 
         # Collect all unique audio paths
         all_audio_paths = sorted({path for d in samples_dicts for path in d.keys()})
+        all_audio_paths = ['../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0873.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0885.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0898.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0980.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0667.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0681.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0714.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0687.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0899.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0643.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0826.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0849.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHameed-AlAkhrass-228-0171.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\AbdulQader-Shohaib-208-0387.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\AbdulQader-Shohaib-208-0443.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\AbdulQader-Shohaib-208-0493.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\AbdulQader-Shohaib-208-0594.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\AbdulRahman-AlBarr-334-0635.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\AbdulRahman-AlBarr-334-0644.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\AbdulRahman-AlBarr-334-0395.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\Abdullateef-Wahba-158-0388.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0886.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0975.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\AbdulMawjood-Lotfi-268-0157.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\AbdulMonaem-Hussain-321-0217.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\AbdulRahman-AlBarr-334-0835.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\AboAlwafa-Bawaab-184-0639.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\Ads-girl3-153-0915.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0930.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0846.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0870.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\Abdullah-Badran-295-0231.wav',
+                        '../data/original/Egy_Coll_5hrs/waves\\Adel-Imam-346-2098.wav']
         # Build combined dict
         combined = {}
         for audio_path in all_audio_paths:
@@ -701,23 +735,28 @@ class HybridEnsemble:
                 "is_chunked": response.is_chunked
             }
         
-        llm_response = {}
+        llm_response = {"llm_time": 0.0}
         if self.use_llm:
+            llm_start = time.time()
             response = self.REINFORCER.main(
                 fusion_tokens=fusion_tokens,
                 candidate_tokens=candidates_tokens,
                 max_tokens=max_tokens, chunk_size=chunk_size, overlap=overlap, 
             )
+            llm_time = time.time() - llm_start
             llm_response = postprocess_reinforced_output(response=response)
+            llm_response["llm_time"] = llm_time
         return llm_response
 
     def fusion(self, **kwargs):
         def fuse_sample_transcriptions(audio_path, transcriptions):
+            voting_start = time.time()
             reference_type, reference, reference_index = self.get_reference_from_transcriptions(transcriptions)
             alignment_results = self.align_transcriptions_to_reference(reference=reference, reference_type=reference_type, reference_index=reference_index,
                                                                        transcriptions=transcriptions)
             voting_result = self.voting_scheme(audio_path, alignment_results)
             data = voting_result[audio_path]
+            data["voting_time"] = time.time() - voting_start
             llm_response = self.llm_reinforcer(
                 fusion_tokens=data["fusion_tokens"],
                 candidates_tokens=data["candidates_tokens"],

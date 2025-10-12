@@ -9,6 +9,7 @@ import time
 
 import numpy as np
 from tqdm import tqdm
+from Levenshtein import distance
 
 from stt_benchmarking.utils import text_processing, helpers, metrics
 from stt_benchmarking.models.llms import reinforcer
@@ -573,6 +574,14 @@ class HybridEnsemble:
             max_count = operation_counts.most_common(1)[0][1]
             tied_operations = [op for op, count in operation_counts.items() if count == max_count]
             if len(tied_operations) > 1:
+                # Current: Conservative (prefer minimal change)
+                # priority_order = ["<KEEP>", "<REPLACE>", "<DELETE>", "<SKIP>", "<INSERT>"]
+
+                # # Aggressive: Prefer correction over preservation
+                # priority_order = ["<REPLACE>", "<KEEP>", "<INSERT>", "<DELETE>", "<SKIP>"]
+
+                # # Reference-biased: Trust original alignment
+                # priority_order = ["<KEEP>", "<SKIP>", "<REPLACE>", "<INSERT>", "<DELETE>"]
                 priority_order = ["<KEEP>", "<REPLACE>", "<DELETE>", "<SKIP>", "<INSERT>"]
                 for preferred_op in priority_order:
                     if preferred_op in tied_operations:
@@ -583,27 +592,67 @@ class HybridEnsemble:
         
         def vote_for_token(position_votes, majority_operation):
             """Determine final token based on operation with random selection"""
+            def token_similarity_tiebreaker(tied_tokens, all_candidate_tokens):
+                """Select token with highest character overlap across all candidates"""
+                if len(tied_tokens) == 1:
+                    return tied_tokens[0]
+                
+                scores = {}
+                for candidate in tied_tokens:
+                    candidate_chars = set(candidate)
+                    total_overlap = sum(
+                        len(candidate_chars & set(other)) 
+                        for other in all_candidate_tokens if other is not None and other != candidate
+                    )
+                    scores[candidate] = total_overlap
+                
+                max_score = max(scores.values())
+                best_tokens = [t for t, s in scores.items() if s == max_score]
+                
+                # return random.choice(best_tokens)  # Random choice
+                return min(best_tokens, key=lambda t: (len(t), hash(t)))  # Length-first hybrid
+
+            def vote_by_edit_distance(tied_tokens, all_tokens):
+                scores = {}
+                for candidate in tied_tokens:
+                    total_distance = sum(
+                        distance(candidate, other) 
+                        for other in all_tokens if other and other != candidate
+                    )
+                    scores[candidate] = total_distance
+                
+                min_distance = min(scores.values())
+                best_tokens = [t for t, d in scores.items() if d == min_distance]
+                
+                if len(best_tokens) > 1:
+                    return token_similarity_tiebreaker(best_tokens, all_tokens)
+                return best_tokens[0]
+                        
             final_token = None
             if majority_operation == "<KEEP>":
-                # Find reference token or use first available
                 for i, is_ref in enumerate(position_votes['is_reference_flags']):
                     if is_ref:
                         final_token = position_votes['tokens'][i]
                         break
-                
                 if final_token is None:
                     final_token = position_votes['tokens'][0]
-                    
+                                
             elif majority_operation in ["<REPLACE>", "<INSERT>"]:
-                # Random selection among models that chose this operation
-                operation_tokens = []
-                
-                for i, op in enumerate(position_votes['operations']):
-                    if op == majority_operation and position_votes['tokens'][i] is not None:
-                        operation_tokens.append(position_votes['tokens'][i])
+                operation_tokens = [
+                    position_votes['tokens'][i]
+                    for i, op in enumerate(position_votes['operations'])
+                    if op == majority_operation and position_votes['tokens'][i] is not None
+                ]
                 
                 if operation_tokens:
-                    final_token = random.choice(operation_tokens)
+                    counts = Counter(operation_tokens)
+                    max_count = counts.most_common(1)[0][1]
+                    tied_tokens = [t for t, c in counts.items() if c == max_count]
+                    if len(tied_tokens) > 1:
+                        all_tokens = position_votes['tokens']
+                        final_token = vote_by_edit_distance(tied_tokens, all_tokens)
+                    else:
+                        final_token = tied_tokens[0]
                     
             elif majority_operation in ["<DELETE>", "<SKIP>"]:
                 final_token = None
@@ -613,15 +662,13 @@ class HybridEnsemble:
         def create_voting_detail(position, operation_counts, majority_operation, final_token, position_votes):
             """Create detailed voting information for a position"""
             token_weights = {}
-            
             if majority_operation in ["<REPLACE>", "<INSERT>"]:
-                for token in set(position_votes['tokens']):
-                    if token is not None:
-                        token_weights[token] = sum(
-                            1  # Count occurrences instead of weights
-                            for i, t in enumerate(position_votes['tokens']) 
-                            if t == token and position_votes['operations'][i] == majority_operation
-                        )
+                operation_tokens = [
+                    position_votes['tokens'][i]
+                    for i, op in enumerate(position_votes['operations'])
+                    if op == majority_operation and position_votes['tokens'][i] is not None
+                ]
+                token_weights = {token: operation_tokens.count(token) for token in set(operation_tokens)}
             
             return {
                 'position': position,
@@ -642,15 +689,25 @@ class HybridEnsemble:
             
             return " ".join(final_transcription_words)
         
-        def calculate_confidence_score(alignment_results, operations_length):
-            """Calculate overall confidence based on operation agreement"""
-            total_positions = operations_length
-            operation_confidence = sum(
-                max(Counter([result['operations'][i] for result in alignment_results]).values()) / len(alignment_results)
-                for i in range(total_positions)
-            ) / total_positions if total_positions > 0 else 0
+        def calculate_confidence_score(alignment_results, fusion_operations, fusion_tokens):
+            total_positions = len(fusion_operations)
+            if total_positions == 0:
+                return 0
             
-            return operation_confidence
+            position_confidences = []
+            for i in range(total_positions):
+                ops = [r['operations'][i] for r in alignment_results]
+                tokens = [r['tokens'][i] for r in alignment_results]
+                
+                op_agreement = ops.count(fusion_operations[i]) / len(ops)
+                
+                if fusion_operations[i] in ["<REPLACE>", "<INSERT>"] and fusion_tokens[i] is not None:
+                    token_agreement = tokens.count(fusion_tokens[i]) / len(tokens)
+                    position_confidences.append((op_agreement + token_agreement) / 2)
+                else:
+                    position_confidences.append(op_agreement)
+            
+            return sum(position_confidences) / total_positions
         
         def create_metadata(alignment_results, fusion_operations):
             """Create metadata about the voting results"""
@@ -697,7 +754,7 @@ class HybridEnsemble:
         
         # Construct final results
         fusion_transcript = construct_final_transcription(fusion_operations, fusion_tokens)
-        confidence_score = calculate_confidence_score(alignment_results, operations_length)
+        confidence_score = calculate_confidence_score(alignment_results, fusion_operations, fusion_tokens)
         metadata = create_metadata(alignment_results, fusion_operations)
         candidates_tokens = [element["tokens"] for element in alignment_results]
         voting_result[audio_path] = {

@@ -25,7 +25,7 @@ class HybridEnsemble:
         self._overall_metrics = None
 
     def initialize_llm(self):
-        self.REINFORCER = reinforcer.TokenReinforcer()
+        self.REINFORCER = reinforcer.FusionReinforcer()
     
     @staticmethod
     def compute_weights(accuracies):

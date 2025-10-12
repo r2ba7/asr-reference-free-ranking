@@ -18,7 +18,7 @@ class GeneratedResponse(BaseModel):
     is_chunked: bool
 
 
-class TokenReinforcer:
+class FusionReinforcer:
     CLIENT = OpenAI(
         base_url="https://openrouter.ai/api/v1",
         api_key=os.getenv("OPENROUTER_API_KEY"),

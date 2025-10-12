@@ -60,7 +60,7 @@ class StandardArabicTextProcessor:
         return [convert_single_text(text) for text in texts]
 
     @staticmethod
-    def remove_symbols(texts: List[str]) -> List[str]:
+    def remove_symbols_and_english_letters(texts: List[str]) -> List[str]:
         """
         Remove all symbols and English letters while keeping Arabic text and numbers.
         
@@ -75,7 +75,7 @@ class StandardArabicTextProcessor:
             # Remove symbols first
             text = StandardArabicTextProcessor.SYMBOLS_TO_REMOVE.sub('', text)
             # Remove English letters
-            # text = StandardArabicTextProcessor.ENGLISH_LETTERS.sub('', text)
+            text = StandardArabicTextProcessor.ENGLISH_LETTERS.sub('', text)
             processed_texts.append(text)
         return processed_texts
 
@@ -209,8 +209,8 @@ class StandardArabicTextProcessor:
         else:
             raise TypeError("Input must be either a string or a list of strings")
 
-        # Step 1: Remove symbols and English letters (NEW STEP) Updated to remove symbols only
-        processed_texts = StandardArabicTextProcessor.remove_symbols(texts)
+        # Step 1: Remove symbols and English letters (NEW STEP)
+        processed_texts = StandardArabicTextProcessor.remove_symbols_and_english_letters(texts)
 
         # Step 2: Remove punctuation (keeping % and @) - enhanced version
         processed_texts = StandardArabicTextProcessor.remove_punctuation(processed_texts)

@@ -59,39 +59,39 @@ class HybridEnsemble:
 
         # Collect all unique audio paths
         all_audio_paths = sorted({path for d in samples_dicts for path in d.keys()})
-        all_audio_paths = ['../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0873.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0885.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0898.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0980.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0667.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0681.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0714.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0687.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0899.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0643.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0826.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0849.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHameed-AlAkhrass-228-0171.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\AbdulQader-Shohaib-208-0387.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\AbdulQader-Shohaib-208-0443.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\AbdulQader-Shohaib-208-0493.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\AbdulQader-Shohaib-208-0594.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\AbdulRahman-AlBarr-334-0635.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\AbdulRahman-AlBarr-334-0644.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\AbdulRahman-AlBarr-334-0395.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\Abdullateef-Wahba-158-0388.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0886.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0975.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\AbdulMawjood-Lotfi-268-0157.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\AbdulMonaem-Hussain-321-0217.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\AbdulRahman-AlBarr-334-0835.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\AboAlwafa-Bawaab-184-0639.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\Ads-girl3-153-0915.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0930.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0846.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0870.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\Abdullah-Badran-295-0231.wav',
-                        '../data/original/Egy_Coll_5hrs/waves\\Adel-Imam-346-2098.wav']
+        # all_audio_paths = ['../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0873.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0885.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0898.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0980.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0667.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0681.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0714.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0687.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0899.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0643.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0826.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0849.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHameed-AlAkhrass-228-0171.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulQader-Shohaib-208-0387.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulQader-Shohaib-208-0443.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulQader-Shohaib-208-0493.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulQader-Shohaib-208-0594.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulRahman-AlBarr-334-0635.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulRahman-AlBarr-334-0644.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulRahman-AlBarr-334-0395.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\Abdullateef-Wahba-158-0388.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0886.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0975.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulMawjood-Lotfi-268-0157.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulMonaem-Hussain-321-0217.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulRahman-AlBarr-334-0835.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\AboAlwafa-Bawaab-184-0639.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\Ads-girl3-153-0915.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0930.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0846.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0870.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\Abdullah-Badran-295-0231.wav',
+        #                 '../data/original/Egy_Coll_5hrs/waves\\Adel-Imam-346-2098.wav']
         # Build combined dict
         combined = {}
         for audio_path in all_audio_paths:
@@ -715,36 +715,37 @@ class HybridEnsemble:
 
     def llm_reinforcer(self, fusion_tokens, candidates_tokens, max_tokens, chunk_size, overlap):
         def postprocess_reinforced_output(response: reinforcer.GeneratedResponse) -> Dict[str, Any]:
-            results = response.reinforced_results
-            final_tokens = []
-            modifications = 0
-            for item in results:
-                token = item.get("token")
-                final_tokens.append(token)
-                if item.get("is_modified"):
-                    modifications += 1
+            results = response.reinforced_results or []
+            modifications = sum(1 for r in results if r.get("is_modified"))
+            
+            # Combine all chunk sentences (non-null only)
+            merged_sentences = [
+                r.get("sentence") for r in results
+                if r.get("sentence") not in [None, "None", "Null", "null", ""]
+            ]
+            final_transcript = " ".join(merged_sentences).strip()
 
-            safe_tokens = [t for t in final_tokens if t not in [None, "None", "Null", "null"]]
-            final_transcript = " ".join(safe_tokens).strip()
             return {
-                "final_tokens": final_tokens,
                 "final_transcript": final_transcript,
+                "chunks": results,  # preserve chunk-level metadata
+                "num_chunks": len(results),
                 "modifications": modifications,
-                "total_tokens": len(final_tokens),
-                "modification_ratio": modifications / len(final_tokens) if final_tokens else 0.0,
-                "is_chunked": response.is_chunked
+                "modification_ratio": modifications / len(results) if results else 0.0,
+                "is_chunked": response.is_chunked,
             }
-        
+
         llm_response = {"llm_time": 0.0}
         if self.use_llm:
             llm_start = time.time()
             response = self.REINFORCER.main(
                 fusion_tokens=fusion_tokens,
                 candidate_tokens=candidates_tokens,
-                max_tokens=max_tokens, chunk_size=chunk_size, overlap=overlap, 
+                max_tokens=max_tokens,
+                chunk_size=chunk_size,
+                overlap=overlap,
             )
             llm_time = time.time() - llm_start
-            llm_response = postprocess_reinforced_output(response=response)
+            llm_response = postprocess_reinforced_output(response)
             llm_response["llm_time"] = llm_time
         return llm_response
 

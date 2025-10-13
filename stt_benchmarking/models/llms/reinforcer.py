@@ -29,7 +29,7 @@ class FusionReinforcer:
     MAX_RETRIES = 3
 
     def __init__(self):
-        print(43)
+        print(45)
 
     # No changes needed for _chunk_needed, _format_sentence_table, _prepare_chunked_operations
     # These methods correctly handle data preparation.
@@ -118,7 +118,6 @@ class FusionReinforcer:
         
         distance = Levenshtein.distance(original_sentence, new_sentence)
         normalized_distance = distance / max(len(original_sentence), len(new_sentence))
-
         if normalized_distance > self.MAX_NORMALIZED_EDIT_DISTANCE:
             LOGGER.warning(f"Guardrail Triggered: Edit distance ({normalized_distance:.2f}) exceeded threshold. Reverting.")
             response["sentence"] = original_sentence
@@ -137,23 +136,28 @@ class FusionReinforcer:
         base_rules = """
             You are a high-fidelity, deterministic error corrector for Arabic ASR ensemble outputs. Your function is to perform cautious, surgical corrections based on a "do no harm" principle.
 
-            **Prime Directive: Do No Harm**
-            Your primary goal is to maintain the integrity and performance of the `fusion_sentence`. It is already a strong, high-quality consensus output. You will only intervene if you can make a verifiable improvement that carries zero risk of degrading the output.
-
-            **The Baseline: Presumed Correct**
-            - The `fusion_sentence` is your baseline and is **presumed to be the correct transcription**. It has already been validated by an ensemble process.
-            - The `options` are alternative hypotheses. They are not inherently better; they are merely sources for potential, high-confidence corrections.
+            **Core Context:**
+            - This text is a transcript of a spoken, informal conversation. It must be an exact reflection of what was said, even if grammatically imperfect.
+            - The `fusion_sentence` is your baseline and is **presumed to be the correct transcription**.
 
             **Decision Framework:**
-            1.  **Identify Conflicts**: Compare the `options` against the `fusion_sentence` to find specific points of disagreement, which indicate potential substitution errors.
-            2.  **Evaluate for Improvement**: For each conflict, determine if an alternative word from an `option` offers a **clear, unambiguous, and contextually superior** correction.
-            3.  **Default to Baseline**: This is your most important rule. If you have **any doubt**, or if a change is merely stylistic, or if it might disrupt the sentence's meaning, you MUST return the original `fusion_sentence` without any modification.
+            1.  **Identify Conflicts**: Compare `options` against the `fusion_sentence`.
+            2.  **Evaluate for Improvement**: An improvement must be a **near-certain correction of an obvious ASR error**, not a stylistic or grammatical enhancement.
+            3.  **Default to Baseline**: If you have **any doubt whatsoever**, return the original `fusion_sentence`.
 
             **Strict Rules:**
-            1.  **No Deletions**: You are FORBIDDEN from deleting any words present in the `fusion_sentence`.
-            2.  **No Hallucinations**: Every single word in your final `sentence` MUST exist in either the original `fusion_sentence` or one of the `options`.
-            3.  **Substitution Focus**: Your task is strictly limited to correcting single-word or short-phrase substitution errors. Do not add or remove information.
-            4.  **Reasoning**: Provide a brief, token-level justification for any change. If no change is made, state "No correction needed; baseline is optimal."
+            1.  **Substitution Threshold (Very High)**: Only substitute a word if multiple `options` agree on a better alternative that fixes a clear grammatical or logical error.
+            
+            2.  **Deletion (Last Resort)**: Deletions are strongly forbidden unless correcting a clear ASR stutter (e.g., "ال ال") that is also omitted by the majority of `options`.
+            
+            3.  **Insertion (Strictly Forbidden for Fluency)**: Your most common error is adding words to improve grammar. This is not allowed.
+                - You are FORBIDDEN from inserting words to make a sentence more fluent or grammatically complete.
+                - **Example**: If `fusion_sentence` is "انا اذهب مدرسه" and an `option` is "انا اذهب الى المدرسه", you MUST NOT add "الى" or "ال". The goal is to transcribe what was said, not to fix the speaker's grammar.
+                - The only time an insertion is allowed is to fix a clear word omission that makes the sentence meaningless, and this fix must be strongly supported by the `options`.
+
+            4.  **No Hallucinations**: Every single word in your final `sentence` MUST exist in either the original `fusion_sentence` or one of the `options`.
+
+            5.  **Reasoning**: Provide a brief, token-level justification for any change. If no change is made, state "No correction needed; baseline is optimal."
 
             Input JSON:
             {
@@ -170,7 +174,6 @@ class FusionReinforcer:
               "is_modified": true|false
             }
         """
-
         input_payload = {
             "fusion_sentence": formatted_sentences.get("fusion_sentence"),
             "options": formatted_sentences.get("options", []),
@@ -179,7 +182,6 @@ class FusionReinforcer:
         }
 
         prompt = f"{base_rules}\n\nInput:\n{json.dumps(input_payload, ensure_ascii=False, indent=2)}"
-        
         original_sentence = formatted_sentences.get("fusion_sentence", "")
         for attempt in range(self.MAX_RETRIES + 1):
             try:

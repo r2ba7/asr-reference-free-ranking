@@ -686,7 +686,6 @@ class HybridEnsemble:
         def construct_final_transcription(fusion_operations, fusion_tokens):
             """Build the final transcription from operations and tokens"""
             final_transcription_words = []
-            
             for operation, token in zip(fusion_operations, fusion_tokens):
                 if operation in ["<KEEP>", "<REPLACE>", "<INSERT>"] and token is not None:
                     final_transcription_words.append(token)
@@ -776,38 +775,51 @@ class HybridEnsemble:
 
     def llm_reinforcer(self, fusion_tokens, candidates_tokens, max_tokens, chunk_size, overlap):
         def postprocess_reinforced_output(response: reinforcer.GeneratedResponse) -> Dict[str, Any]:
-            results = response.reinforced_results or []
-            modifications = sum(1 for r in results if r.get("is_modified"))
-            
-            # Combine all chunk sentences (non-null only)
-            merged_sentences = [
-                r.get("sentence") for r in results
-                if r.get("sentence") not in [None, "None", "Null", "null", ""]
-            ]
-            final_transcript = " ".join(merged_sentences).strip()
+            chunks = response.reinforced_results or []
+            modifications = sum(1 for chunk in chunks if chunk.get("is_modified"))
+            transcript_pieces = []
+            for chunk in chunks:
+                if chunk.get("is_modified") and chunk.get("sentence"):
+                    transcript_pieces.append(chunk["sentence"])
+                else:
+                    metadata = chunk.get("metadata", {})
+                    original_sentence = metadata.get("fusion_sentence", "")
+                    transcript_pieces.append(original_sentence)
 
+            unwanted_values = [None, "None", "Null", "null", ""]
+            filtered_pieces = [piece for piece in transcript_pieces if piece not in unwanted_values]
+            llm_transcript = " ".join(filtered_pieces).strip()
             return {
-                "final_transcript": final_transcript,
-                "chunks": results,  # preserve chunk-level metadata
-                "num_chunks": len(results),
+                "llm_transcript": llm_transcript,
+                "chunks": chunks,
+                "num_chunks": len(chunks),
                 "modifications": modifications,
-                "modification_ratio": modifications / len(results) if results else 0.0,
+                "modification_ratio": modifications / len(chunks) if chunks else 0.0,
                 "is_chunked": response.is_chunked,
             }
 
-        llm_response = {"llm_time": 0.0}
-        if self.use_llm:
-            llm_start = time.time()
-            response = self.REINFORCER.main(
-                fusion_tokens=fusion_tokens,
-                candidate_tokens=candidates_tokens,
-                max_tokens=max_tokens,
-                chunk_size=chunk_size,
-                overlap=overlap,
-            )
-            llm_time = time.time() - llm_start
-            llm_response = postprocess_reinforced_output(response)
-            llm_response["llm_time"] = llm_time
+        if not self.use_llm:
+            return {
+                "llm_transcript": "",
+                "llm_time": 0.0,
+                "chunks": [],
+                "num_chunks": 0,
+                "modifications": 0,
+                "modification_ratio": 0.0,
+                "is_chunked": False,
+            }
+        
+        llm_start = time.time()
+        response = self.REINFORCER.main(
+            fusion_tokens=fusion_tokens,
+            candidate_tokens=candidates_tokens,
+            max_tokens=max_tokens,
+            chunk_size=chunk_size,
+            overlap=overlap,
+        )
+        llm_time = time.time() - llm_start
+        llm_response = postprocess_reinforced_output(response)
+        llm_response["llm_time"] = llm_time
         return llm_response
 
     def fusion(self, **kwargs):
@@ -854,7 +866,7 @@ class HybridEnsemble:
             return data["fusion_transcript"]
 
         def _eval_llm(data):
-            return data["llm_response"]["final_transcript"]
+            return data["llm_response"]["llm_transcript"]
 
         refs_lookup = {sample["audio_path"]: sample["normalized_transcription"] for sample in audios_chunk}
         all_audio_paths = list(self._fusion_results.keys())

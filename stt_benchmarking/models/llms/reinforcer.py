@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 import os
 import Levenshtein  # Required for edit distance guardrail. Install with: pip install python-Levenshtein
+import re
 
 from openai import OpenAI
 
@@ -29,7 +30,7 @@ class FusionReinforcer:
     MAX_RETRIES = 3
 
     def __init__(self):
-        print(45)
+        print(50)
 
     # No changes needed for _chunk_needed, _format_sentence_table, _prepare_chunked_operations
     # These methods correctly handle data preparation.
@@ -85,53 +86,90 @@ class FusionReinforcer:
             results.extend(res)
         return results
 
-    def _apply_guardrails(self, response: Dict, original_sentence: str, options: List[str]) -> Dict:
-        """
-        [REVISED] Validates the LLM's output against programmatic rules.
-        Assumes original_sentence and options are pre-normalized.
-        Normalizes the LLM's output before comparison.
-        """
-        if not response.get("is_modified") or not response.get("sentence"):
-            return response
-
-        # STEP 1: Normalize the untrusted LLM output. This is the only normalization needed.
-        new_sentence = StandardArabicTextProcessor.main(response["sentence"])
-        response["sentence"] = new_sentence # Update the response with the clean version.
-
-        # Guardrail 1: Vocabulary Check
-        # Builds the allowed vocabulary from the already-normalized inputs.
-        allowed_tokens = set(original_sentence.split())
-        for opt in options:
-            allowed_tokens.update(opt.split())
-        
-        output_tokens = set(new_sentence.split())
-
-        if not output_tokens.issubset(allowed_tokens):
-            LOGGER.warning("Guardrail Triggered: LLM hallucinated new tokens (post-normalization). Reverting.")
-            response["sentence"] = original_sentence
-            response["is_modified"] = False
-            response["reasoning"] = "Rejected by vocabulary guardrail."
-            return response
-
-        # Guardrail 2: Edit Distance Threshold
-        if not original_sentence: return response
-        
-        distance = Levenshtein.distance(original_sentence, new_sentence)
-        normalized_distance = distance / max(len(original_sentence), len(new_sentence))
-        if normalized_distance > self.MAX_NORMALIZED_EDIT_DISTANCE:
-            LOGGER.warning(f"Guardrail Triggered: Edit distance ({normalized_distance:.2f}) exceeded threshold. Reverting.")
-            response["sentence"] = original_sentence
-            response["is_modified"] = False
-            response["reasoning"] = "Rejected by edit distance guardrail."
-            return response
-            
-        return response
-
     def _llm_reinforcement(self, idx: int, formatted_sentences: Dict[str, Any],
                            context_before=None, context_after=None) -> List[Dict[str, Any]]:
         """
         [MODIFIED] Sends a more constrained prompt to a stronger model and validates the output.
         """
+        def _apply_guardrails(response: Dict, original_sentence: str, options: List[str]) -> Dict:
+            """
+            [REVISED] Validates the LLM's output against programmatic rules.
+            Assumes original_sentence and options are pre-normalized.
+            Normalizes the LLM's output before comparison.
+            """
+            if not response.get("is_modified") or not response.get("sentence"):
+                return response
+
+            # STEP 1: Normalize the untrusted LLM output. This is the only normalization needed.
+            new_sentence = StandardArabicTextProcessor.main(response["sentence"])
+            response["sentence"] = new_sentence # Update the response with the clean version.
+
+            # Guardrail 1: Vocabulary Check
+            # Builds the allowed vocabulary from the already-normalized inputs.
+            allowed_tokens = set(original_sentence.split())
+            for opt in options:
+                allowed_tokens.update(opt.split())
+            
+            output_tokens = set(new_sentence.split())
+            if not output_tokens.issubset(allowed_tokens):
+                LOGGER.warning("Guardrail Triggered: LLM hallucinated new tokens (post-normalization). Reverting.")
+                response["sentence"] = original_sentence
+                response["is_modified"] = False
+                response["reasoning"] = "Rejected by vocabulary guardrail."
+                return response
+
+            # Guardrail 2: Edit Distance Threshold
+            if not original_sentence: return response
+            
+            distance = Levenshtein.distance(original_sentence, new_sentence)
+            normalized_distance = distance / max(len(original_sentence), len(new_sentence))
+            if normalized_distance > self.MAX_NORMALIZED_EDIT_DISTANCE:
+                LOGGER.warning(f"Guardrail Triggered: Edit distance ({normalized_distance:.2f}) exceeded threshold. Reverting.")
+                response["sentence"] = original_sentence
+                response["is_modified"] = False
+                response["reasoning"] = "Rejected by edit distance guardrail."
+                return response
+                
+            return response
+        
+        def _salvage_broken_json(malformed_string: str) -> dict | None:
+            """
+            Attempts to repair a malformed JSON string from an LLM.
+            Specifically designed to handle unterminated strings by looking for known keys
+            and extracting the content that follows them.
+            """
+            try:
+                salvaged_data = {}
+                
+                # 1. Extract 'reasoning'
+                # Pattern looks for "reasoning":" and captures everything until the next key ("sentence")
+                reasoning_match = re.search(r'"reasoning"\s*:\s*"(.+?)(?=","sentence"|})', malformed_string, re.DOTALL)
+                if reasoning_match:
+                    salvaged_data['reasoning'] = reasoning_match.group(1).strip()
+
+                # 2. Extract 'sentence' (this is often the broken one)
+                # Pattern looks for "sentence":" and captures everything until the next key ("is_modified")
+                sentence_match = re.search(r'"sentence"\s*:\s*"(.+?)(?=","is_modified"|})', malformed_string, re.DOTALL)
+                if sentence_match:
+                    # Clean up potential trailing characters if the string was unterminated
+                    salvaged_data['sentence'] = sentence_match.group(1).strip().rstrip('"').rstrip(',')
+
+                # 3. Extract 'is_modified' (usually a boolean)
+                modified_match = re.search(r'"is_modified"\s*:\s*(true|false)', malformed_string)
+                if modified_match:
+                    salvaged_data['is_modified'] = modified_match.group(1) == 'true'
+
+                # 4. Validate the salvaged data
+                if all(key in salvaged_data for key in ['reasoning', 'sentence', 'is_modified']):
+                    LOGGER.warning("Successfully salvaged a broken JSON response.")
+                    return salvaged_data
+                    
+            except Exception as e:
+                LOGGER.error(f"Salvage operation failed: {e}")
+            
+            return None
+        
+
         # CHANGE 1: The prompt is now highly restrictive, focusing only on surgical corrections.
         base_rules = """
             You are a high-fidelity, deterministic error corrector for Arabic ASR ensemble outputs. Your function is to perform cautious, surgical corrections based on a "do no harm" principle.
@@ -180,15 +218,12 @@ class FusionReinforcer:
             "context_before": context_before,
             "context_after": context_after,
         }
-
         prompt = f"{base_rules}\n\nInput:\n{json.dumps(input_payload, ensure_ascii=False, indent=2)}"
         original_sentence = formatted_sentences.get("fusion_sentence", "")
         for attempt in range(self.MAX_RETRIES + 1):
             try:
                 completion = self.CLIENT.chat.completions.create(
-                    # CHANGE 2: Upgraded model for better reasoning and instruction-following.
-                    model="google/gemini-2.5-flash",
-                    # CHANGE 3: Temperature set to 0 for deterministic, repeatable outputs.
+                    model="openai/gpt-4o",
                     temperature=0.0,
                     messages=[{"role": "user", "content": prompt}],
                     response_format={
@@ -199,29 +234,45 @@ class FusionReinforcer:
                             "schema": {
                                 "type": "object",
                                 "properties": {
-                                    # CHANGE 4: Added 'reasoning' to the schema to force justification.
                                     "reasoning": {"type": "string"},
                                     "sentence": {"type": ["string", "null"]},
                                     "is_modified": {"type": "boolean"},
                                 },
                                 "required": ["reasoning", "sentence", "is_modified"],
+                                "additionalProperties": False
                             },
                         },
                     },
                 )
-                response = json.loads(completion.choices[0].message.content)
-                validated_response = self._apply_guardrails(response, original_sentence, input_payload["options"])
+                response_text = completion.choices[0].message.content
+                response = json.loads(response_text)
+                validated_response = _apply_guardrails(response, original_sentence, input_payload["options"])
                 validated_response["idx"] = idx
                 validated_response["metadata"] = {
                     "fusion_sentence": original_sentence,
+                    "options": input_payload["options"],
                     "options_count": len(input_payload["options"]),
-                    "has_context_before": bool(context_before),
-                    "has_context_after": bool(context_after),
+                    "context_before": context_before,
+                    "context_after": context_after,
                 }
                 return [validated_response]
 
             except json.JSONDecodeError as e:
                 LOGGER.warning(f"LLM returned malformed JSON on attempt {attempt + 1}. Error: {e}")
+                salvaged_response = _salvage_broken_json(response_text)
+                if salvaged_response:
+                    LOGGER.info("Successfully salvaged the broken JSON.")
+                    validated_response = _apply_guardrails(salvaged_response, original_sentence, input_payload["options"])
+                    validated_response["idx"] = idx
+                    validated_response["metadata"] = {
+                        "fusion_sentence": original_sentence,
+                        "options": input_payload["options"],
+                        "options_count": len(input_payload["options"]),
+                        "context_before": context_before,
+                        "context_after": context_after,
+                    }
+                    return [validated_response]
+                
                 if attempt >= self.MAX_RETRIES:
                     LOGGER.error("Max retries reached for malformed JSON. Falling back.")
                     break
@@ -230,8 +281,19 @@ class FusionReinforcer:
                 LOGGER.error(f"LLM reinforcement failed on attempt {attempt + 1}: {e}. Falling back.")
                 break 
 
-        return [{"sentence": original_sentence, "is_modified": False, 
-                 "reasoning": "Fell back due to persistent API/JSON errors.", "idx": idx, "metadata": {}}]
+        return [{
+            "sentence": original_sentence, 
+            "is_modified": False, 
+            "reasoning": "Fell back due to persistent API/JSON errors.", 
+            "idx": idx, 
+            "metadata": {
+                "fusion_sentence": original_sentence,
+                "options": input_payload["options"],
+                "options_count": len(input_payload["options"]),
+                "context_before": context_before,
+                "context_after": context_after,
+            }
+        }]
 
 
     def main(self, fusion_tokens: List[str], candidate_tokens: List[List[str]],

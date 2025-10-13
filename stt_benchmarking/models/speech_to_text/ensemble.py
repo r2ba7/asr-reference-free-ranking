@@ -6,6 +6,7 @@ import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Any
 import time
+import hashlib
 
 import numpy as np
 from tqdm import tqdm
@@ -593,6 +594,9 @@ class HybridEnsemble:
         def vote_for_token(position_votes, majority_operation):
             """Determine final token based on operation with random selection"""
             def token_similarity_tiebreaker(tied_tokens, all_candidate_tokens):
+                def stable_hash(s):
+                    return int(hashlib.md5(s.encode('utf-8')).hexdigest(), 16)
+                
                 """Select token with highest character overlap across all candidates"""
                 if len(tied_tokens) == 1:
                     return tied_tokens[0]
@@ -610,7 +614,7 @@ class HybridEnsemble:
                 best_tokens = [t for t, s in scores.items() if s == max_score]
                 
                 # return random.choice(best_tokens)  # Random choice
-                return min(best_tokens, key=lambda t: (len(t), hash(t)))  # Length-first hybrid
+                return min(best_tokens, key=lambda t: (len(t), stable_hash(t)))  # Length-first hybrid
 
             def vote_by_edit_distance(tied_tokens, all_tokens):
                 scores = {}

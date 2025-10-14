@@ -17,12 +17,14 @@ from stt_benchmarking.models.llms import reinforcer
 from . import LOGGER
 
 class HybridEnsemble:
-    def __init__(self, use_llm):
+    def __init__(self, use_llm, perfection_rule_length=5, dynamic_match_percentage=0.8):
         self.use_llm = use_llm
+        self.perfection_rule_length = perfection_rule_length
+        self.dynamic_match_percentage = dynamic_match_percentage
         if self.use_llm:
             self.initialize_llm()
         self._input_to_fusion = {}
-        self._fusion_results = []
+        self._samples_info = {}
         self._processed_results = []
         self._overall_metrics = None
 
@@ -117,17 +119,15 @@ class HybridEnsemble:
                     return (i, j)
         return None
     
-    @staticmethod
-    def validate_anchor_quality(reference, transcription):
+    def validate_anchor_quality(self, reference, transcription):
         """
         Validate that anchors represent meaningful common structure using SequenceMatcher
         
         Returns:
             tuple: (is_valid, anchor_info)
         """
-        anchors = HybridEnsemble.find_first_anchors(reference, transcription)
-        if not anchors:
-            return False, None
+        anchors = self.find_first_anchors(reference, transcription)
+        if not anchors: return False, None
             
         ref_pos, trans_pos = anchors
         ref_words = reference.split()
@@ -139,16 +139,24 @@ class HybridEnsemble:
         # Get the longest matching block starting from position 0 (right after anchor)
         longest_match = matcher.find_longest_match(0, len(ref_remaining), 0, len(trans_remaining))
         additional_matches = longest_match.size
-        min_len = min(len(ref_remaining), len(trans_remaining))
-        if min_len <= 2:
-            is_valid = additional_matches == min_len
+        shorter_sequence_length = min(len(ref_remaining), len(trans_remaining))
+        is_valid = False
+        min_required = 0
+        if shorter_sequence_length <= self.perfection_rule_length:
+            # Check if the number of matching words is exactly equal to the length of the shorter sequence.
+            min_required = shorter_sequence_length
+            if additional_matches == shorter_sequence_length:
+                is_valid = True
         else:
-            is_valid = additional_matches >= 2
-            
+            min_required = int(shorter_sequence_length * self.dynamic_match_percentage)
+            # Check if we found at least our minimum required number of matches.
+            if additional_matches >= min_required:
+                is_valid = True
+
         return is_valid, {
             "positions": anchors, 
             "additional_matches": additional_matches,
-            "min_required": 2 if min_len > 2 else min_len
+            "min_required": min_required
         }
 
     # Done reference
@@ -283,86 +291,156 @@ class HybridEnsemble:
         """
         # Wont change
         def align_with_longest_strategy(reference, transcriptions, reference_index=reference_index, reference_type=reference_type):
+            """
+            Aligns a list of transcriptions against a single authoritative reference.
+
+            This function uses the provided 'reference' sentence as a structural backbone.
+            It iterates through each transcription in the list and compares it to the
+            reference using Python's SequenceMatcher. For each position in the
+            reference, it determines an operation ('<KEEP>', '<REPLACE>', '<DELETE>')
+            and the corresponding token from the transcription.
+
+            The key characteristic of this strategy is that the output structure is
+            always dictated by the length of the reference. Insertions in the
+            candidate transcriptions are ignored in the final alignment to preserve this
+            structure, ensuring all output lists have the same length.
+
+            Args:
+                reference (str): The authoritative transcription to align against.
+                transcriptions (list[str]): A list of all candidate transcriptions.
+                reference_index (int): The index of the reference sentence within the
+                    transcriptions list.
+                reference_type (str): A string descriptor for the strategy used
+                    (e.g., "longest").
+
+            Returns:
+                list[dict]: A list of alignment result dictionaries, one for each
+                            transcription. Each dictionary contains:
+                            - 'model_index' (int): The original index of the model.
+                            - 'reference_type' (str): The strategy name.
+                            - 'is_reference' (bool): A flag indicating if this was
+                            the reference transcription.
+                            - 'operations' (list[str]): A list of operations
+                            relative to the reference.
+                            - 'tokens' (list[str or None]): A list of words (or None)
+                            aligned to the reference positions.
+            """
             alignment_results = []
             ref_words = reference.split()
-            for model_index, transcription in enumerate( transcriptions):
+            
+            # --- PHASE 1: SURVEY AND PAD THE REFERENCE ---
+            
+            # Find all unique insertion points from other transcriptions
+            insertion_map = {}
+            for model_idx, transcription in enumerate(transcriptions):
+                if model_idx == reference_index or not transcription:
+                    continue
+                
+                trans_words = transcription.split()
+                matcher = SequenceMatcher(None, ref_words, trans_words)
+                for op, ref_start, _, trans_start, trans_end in matcher.get_opcodes():
+                    if op == 'insert':
+                        if ref_start not in insertion_map:
+                            insertion_map[ref_start] = []
+                        insertion_map[ref_start].extend(trans_words[trans_start:trans_end])
+
+            # Build the new, flexible "padded" reference blueprint
+            padded_ref_words = []
+            for i, word in enumerate(ref_words):
+                if i in insertion_map:
+                    # Add placeholders for unique words other models inserted
+                    padded_ref_words.extend([None] * len(set(insertion_map[i])))
+                padded_ref_words.append(word)
+            
+            # Handle insertions that occur after the last word of the reference
+            if len(ref_words) in insertion_map:
+                padded_ref_words.extend([None] * len(set(insertion_map[len(ref_words)])))
+                
+            padded_ref_length = len(padded_ref_words)
+
+            # --- PHASE 2: ALIGN ALL TRANSCRIPTIONS TO THE PADDED REFERENCE ---
+
+            for model_index, transcription in enumerate(transcriptions):
                 alignment_result = {
                     'model_index': model_index,
                     'reference_type': reference_type,
                     'is_reference': (model_index == reference_index)
                 }
+                
+                # Align the original reference model to the new padded structure
                 if model_index == reference_index:
-                    alignment_result['operations'] = ["<KEEP>"] * len(ref_words)
-                    alignment_result['tokens'] = ref_words.copy()
+                    alignment_result['operations'] = ["<KEEP>" if w is not None else "<DELETE>" for w in padded_ref_words]
+                    alignment_result['tokens'] = padded_ref_words[:]
+                
+                # Align all other models to the new padded structure
                 else:
                     if not transcription:
-                        alignment_result['operations'] = ["<DELETE>"] * len(ref_words)
-                        alignment_result['tokens'] = [None] * len(ref_words)
+                        alignment_result['operations'] = ["<DELETE>"] * padded_ref_length
+                        alignment_result['tokens'] = [None] * padded_ref_length
                     else:
                         trans_words = transcription.split()
-                        operations = ["<DELETE>"] * len(ref_words)
-                        candidate_values = [None] * len(ref_words)
-                        matcher = SequenceMatcher(None, ref_words, trans_words)
+                        operations = ["<DELETE>"] * padded_ref_length
+                        tokens = [None] * padded_ref_length
+                        
+                        # Use SequenceMatcher against the FLEXIBLE blueprint
+                        matcher = SequenceMatcher(None, padded_ref_words, trans_words)
                         for op, ref_start, ref_end, trans_start, trans_end in matcher.get_opcodes():
                             if op == 'equal':
                                 for i in range(ref_start, ref_end):
                                     operations[i] = "<KEEP>"
-                                    candidate_values[i] = ref_words[i]  # Same as trans_words[trans_start + (i - ref_start)]
-                                    
+                                    tokens[i] = trans_words[trans_start + (i - ref_start)]
                             elif op == 'replace':
                                 for i in range(ref_start, ref_end):
                                     operations[i] = "<REPLACE>"
                                     trans_idx = trans_start + (i - ref_start)
                                     if trans_idx < trans_end:
-                                        candidate_values[i] = trans_words[trans_idx]
-                                    else:
-                                        candidate_values[i] = None
-                                        
+                                        tokens[i] = trans_words[trans_idx]
                             elif op == 'delete':
                                 for i in range(ref_start, ref_end):
                                     operations[i] = "<DELETE>"
-                                    candidate_values[i] = None
-                                    
+                            # 'insert' is now handled implicitly by the padded structure,
+                            # so a 'pass' is safe here as a fallback.
                             elif op == 'insert':
-                                # Words exist in transcription but not in reference
-                                # These don't affect our reference-based operations array
-                                # but could be logged for debugging
                                 pass
-
+                        
                         alignment_result['operations'] = operations
-                        alignment_result['tokens'] = candidate_values
+                        alignment_result['tokens'] = tokens
+                
                 alignment_results.append(alignment_result)
-            return alignment_results        
+                
+            return alignment_results
 
         def align_with_common_words_strategy(reference, transcriptions, reference_index=reference_index, reference_type=reference_type):
             """
-            Alignment strategy for consensus-based reference selection.
-            
-            Flow:
-            1. Reference Padding Phase:
-            - Start with the selected reference (most similar to all transcriptions)
-            - Compare reference against each other transcription using SequenceMatcher
-            - Identify all 'insert' operations (words present in transcriptions but missing in reference)
-            - Insert None placeholders at corresponding positions in reference
-            - Result: padded reference with None slots where other models have extra words
-            
-            2. Alignment Phase:
-            - For reference model: mark all original words as <KEEP>, None slots as <DELETE>
-            - For other models:
-                a. Align transcription words to padded reference using SequenceMatcher
-                b. Map operations:
-                    - 'equal': <KEEP> + copy word
-                    - 'replace': <REPLACE> + candidate word
-                    - 'delete': <DELETE> + None
-                    - 'insert': ignore (doesn't map to reference positions)
-                c. Store operations array and tokens array (aligned to padded reference length)
-            
-            3. Output:
-            - List of alignment_result dicts, one per model
-            - Each contains: model_index, reference_type, is_reference flag, operations, tokens
-            - All arrays have same length (padded reference length) for position-wise voting
-            
-            Purpose: Accommodate structural differences when no single transcription serves as clear anchor
+            Aligns transcriptions using a flexible, consensus-based reference.
+
+            This strategy is designed for cases where no single transcription is a clear
+            structural authority. It works in two main phases:
+
+            1.  **Reference Padding:** It first surveys all other transcriptions to find
+                words they contain that are missing from the reference ('insertions').
+                It then creates a new "padded" reference by inserting `None`
+                placeholders at the appropriate positions to create slots for these
+                potential new words.
+
+            2.  **Final Alignment:** It then aligns all transcriptions against this new,
+                longer, padded reference. This allows words that would have been
+                insertions to be properly mapped to a slot, enabling a vote on whether
+                they should be included in the final output.
+
+            The purpose is to create a flexible alignment structure that accommodates
+            structural differences between models, rather than strictly enforcing the
+            structure of one reference.
+
+            Args:
+                reference (str): The consensus-based transcription to use as a starting point.
+                transcriptions (list[str]): A list of all candidate transcriptions.
+                reference_index (int): The index of the reference sentence.
+                reference_type (str): A string descriptor for the strategy.
+
+            Returns:
+                list[dict]: A list of alignment result dictionaries, one for each
+                            transcription, all aligned to the padded reference length.
             """
             alignment_results = []
             ref_words = reference.split()
@@ -822,7 +900,7 @@ class HybridEnsemble:
         llm_response["llm_time"] = llm_time
         return llm_response
 
-    def fusion(self, **kwargs):
+    def main(self, **kwargs):
         def fuse_sample_transcriptions(audio_path, transcriptions):
             voting_start = time.time()
             reference_type, reference, reference_index = self.get_reference_from_transcriptions(transcriptions)
@@ -853,13 +931,12 @@ class HybridEnsemble:
 
         with ThreadPoolExecutor(max_workers=8) as executor:
             futures = {executor.submit(process_item, item): item for item in self.input_to_fusion.items()}
-            fusion_results = {}
-            fusion_results = {}
+            samples_info = {}
             for future in tqdm(as_completed(futures), total=len(futures), desc="Fusing Inputs..."):
                 result = future.result()  # this is {audio_path: {...}}
-                fusion_results.update(result)
+                samples_info.update(result)
 
-        self._fusion_results = dict(sorted(fusion_results.items()))
+        self._samples_info = dict(sorted(samples_info.items()))
 
     def eval(self, audios_chunk):
         def _eval_common(data):
@@ -869,36 +946,36 @@ class HybridEnsemble:
             return data["llm_response"]["llm_transcript"]
 
         refs_lookup = {sample["audio_path"]: sample["normalized_transcription"] for sample in audios_chunk}
-        all_audio_paths = list(self._fusion_results.keys())
+        all_audio_paths = list(self._samples_info.keys())
         for i, audio_path in enumerate(all_audio_paths):
-            if audio_path in self._fusion_results:
+            if audio_path in self._samples_info:
                 try:
                     ref = refs_lookup.get(audio_path)
-                    hyp = _eval_llm(self._fusion_results[audio_path]) if self.use_llm else _eval_common(self._fusion_results[audio_path])
-                    self._fusion_results[audio_path]["normalized_prediction"] = text_processing.StandardArabicTextProcessor.main(hyp, substitute=True)
-                    self._fusion_results[audio_path]["normalized_transcription"] = ref
+                    hyp = _eval_llm(self._samples_info[audio_path]) if self.use_llm else _eval_common(self._samples_info[audio_path])
+                    self._samples_info[audio_path]["normalized_prediction"] = text_processing.StandardArabicTextProcessor.main(hyp, substitute=True)
+                    self._samples_info[audio_path]["normalized_transcription"] = ref
                     if ref is not None:
-                        norm_hyp = self._fusion_results[audio_path]["normalized_prediction"]
+                        norm_hyp = self._samples_info[audio_path]["normalized_prediction"]
                         sample_metrics = metrics.BasicSTTMetrics.evaluate(refs=ref, hyps=norm_hyp)
-                        self._fusion_results[audio_path]["metrics"] = sample_metrics
+                        self._samples_info[audio_path]["metrics"] = sample_metrics
                     else:
-                        self._fusion_results[audio_path]["metrics"] = helpers._empty_metrics()
+                        self._samples_info[audio_path]["metrics"] = helpers._empty_metrics()
 
                 except Exception as e:
                     LOGGER.error(f"Error processing sample {i+1}, Name: {audio_path}, failed: {e}")
-                    self._fusion_results[audio_path] = {
+                    self._samples_info[audio_path] = {
                         "normalized_prediction": None,
                         "metrics": helpers._empty_metrics()
                     }
             else:
-                self._fusion_results[audio_path] = {
+                self._samples_info[audio_path] = {
                     "normalized_prediction": None,
                     "metrics": helpers._empty_metrics()
                 }
 
         # Compute overall metrics
-        refs = [v["normalized_transcription"] for v in self._fusion_results.values()]
-        hyps = [v["normalized_prediction"] for v in self._fusion_results.values()]
+        refs = [v["normalized_transcription"] for v in self._samples_info.values()]
+        hyps = [v["normalized_prediction"] for v in self._samples_info.values()]
         self._overall_metrics = metrics.BasicSTTMetrics.evaluate(refs=refs, hyps=hyps)
 
     def summary_of_evaluation(self):
@@ -943,14 +1020,14 @@ class HybridEnsemble:
         self._input_to_fusion = value
 
     @property
-    def fusion_results(self):
+    def samples_info(self):
         """
         Get the fusion results.
         """
-        if not self._fusion_results:
+        if not self._samples_info:
             raise ValueError("Run EnsembleInference.fusion first.")
         
-        return self._fusion_results
+        return self._samples_info
     
     @property
     def overall_metrics(self):

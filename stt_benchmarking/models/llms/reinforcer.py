@@ -30,7 +30,7 @@ class FusionReinforcer:
     MAX_RETRIES = 3
 
     def __init__(self):
-        print(50)
+        print(51)
 
     # No changes needed for _chunk_needed, _format_sentence_table, _prepare_chunked_operations
     # These methods correctly handle data preparation.
@@ -223,7 +223,7 @@ class FusionReinforcer:
         for attempt in range(self.MAX_RETRIES + 1):
             try:
                 completion = self.CLIENT.chat.completions.create(
-                    model="openai/gpt-4o",
+                    model="google/gemini-2.5-flash",
                     temperature=0.0,
                     messages=[{"role": "user", "content": prompt}],
                     response_format={

@@ -7,10 +7,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Any
 import time
 import hashlib
+import math
 
 import numpy as np
 from tqdm import tqdm
 from Levenshtein import distance
+import kenlm
 
 from stt_benchmarking.utils import text_processing, helpers, metrics
 from stt_benchmarking.models.llms import reinforcer
@@ -19,16 +21,17 @@ from . import LOGGER
 class HybridEnsemble:
     def __init__(self, use_llm, perfection_rule_length=5, dynamic_match_percentage=0.8):
         self.use_llm = use_llm
+        if self.use_llm:
+            self._initialize_llm()
+
         self.perfection_rule_length = perfection_rule_length
         self.dynamic_match_percentage = dynamic_match_percentage
-        if self.use_llm:
-            self.initialize_llm()
         self._input_to_fusion = {}
         self._samples_info = {}
         self._processed_results = []
         self._overall_metrics = None
 
-    def initialize_llm(self):
+    def _initialize_llm(self):
         self.REINFORCER = reinforcer.FusionReinforcer()
     
     @staticmethod
@@ -164,20 +167,27 @@ class HybridEnsemble:
         def get_longest_reference(transcriptions):
             valid_transcriptions = [(i, t) for i, t in enumerate(transcriptions) if t is not None]
             if not valid_transcriptions:
-                return False, None, None
+                return False, None, None, None
             
             longest_original_index, longest_reference = max(valid_transcriptions, key=lambda x: len(x[1]))
             successful_alignments = 0
             total_comparisons = len(valid_transcriptions) - 1
             for original_index, transcription in valid_transcriptions:
                 if original_index != longest_original_index:
-                    is_valid, anchor_info = self.validate_anchor_quality(longest_reference, transcription)
+                    is_valid, _ = self.validate_anchor_quality(longest_reference, transcription)
                     if is_valid:
                         successful_alignments += 1
             
             success_ratio = successful_alignments / total_comparisons if total_comparisons > 0 else 1.0
             success = success_ratio >= 0.5
-            return success, longest_reference, longest_original_index
+            metadata = {
+                'strategy_metric': 'validation_success_ratio',
+                'score': success_ratio,
+                'successful_alignments': successful_alignments,
+                'total_comparisons': total_comparisons,
+                'reference_index': longest_original_index
+            }
+            return success, longest_reference, longest_original_index, metadata
         
         def get_common_words_reference(transcriptions):
             """
@@ -185,18 +195,16 @@ class HybridEnsemble:
             """
             def calculate_similarity(sentence1, sentence2):
                 """Calculate similarity ratio between two sentences using SequenceMatcher"""
-                words1 = sentence1.split()
-                words2 = sentence2.split()
+                words1, words2 = sentence1.split(), sentence2.split()
                 matcher = SequenceMatcher(None, words1, words2)
                 return matcher.ratio()
             
             valid_transcriptions = [(i, t) for i, t in enumerate(transcriptions) if t is not None]
             if not valid_transcriptions:
-                return False, None, None
+                return False, None, None, None
 
             best_total_similarity = -1
-            best_reference = None
-            best_index = None
+            best_reference, best_index = None, None
             for original_i, transcription_i in valid_transcriptions:
                 total_similarity = 0.0
                 for original_j, transcription_j in valid_transcriptions:
@@ -209,10 +217,18 @@ class HybridEnsemble:
                     best_reference = transcription_i
                     best_index = original_i
             
-            if best_reference and best_total_similarity > 0:
-                return True, best_reference, best_index
+            if best_reference and best_total_similarity >= 0:
+                num_comparisons = len(valid_transcriptions) - 1 if len(valid_transcriptions) > 1 else 1
+                avg_similarity = best_total_similarity / num_comparisons if num_comparisons > 0 else 0.0
+                metadata = {
+                    'strategy_metric': 'average_similarity_to_best',
+                    'score': avg_similarity,
+                    'total_similarity_score': best_total_similarity,
+                    'reference_index': best_index
+                }
+                return True, best_reference, best_index, metadata
             
-            return False, None, None
+            return False, None, None, None
 
         def get_longest_reference_fallback(transcriptions):
             """
@@ -256,27 +272,27 @@ class HybridEnsemble:
             
             # Success if we found reasonable consensus (>30% similarity)
             success = best_avg_similarity >= 0.2
-            return success, best_reference, best_index
+            metadata = {
+                'strategy_metric': 'average_pairwise_similarity',
+                'score': best_avg_similarity,
+                'reference_index': best_index
+            }
+            return success, best_reference, best_index, metadata
         
         # Always ensure we have at least one valid transcription to return
         valid_transcriptions = [t for t in transcriptions if t is not None]
         if not valid_transcriptions:
             return None, None, None
         
-        longest_success, longest_reference, longest_index = get_longest_reference(transcriptions)
-        if longest_success:
-            return "longest", longest_reference, longest_index
+        longest_success, longest_reference, longest_index, reference_metadata = get_longest_reference(transcriptions)
+        if longest_success: return "longest", longest_reference, longest_index, reference_metadata
 
-        common_words_success, common_words_reference, common_words_index = get_common_words_reference(transcriptions)
-        if common_words_success:
-            return "common_words", common_words_reference, common_words_index
+        common_words_success, common_words_reference, common_words_index, reference_metadata = get_common_words_reference(transcriptions)
+        if common_words_success: return "common_words", common_words_reference, common_words_index, reference_metadata
 
-        fallback_success, fallback_reference, fallback_index = get_longest_reference_fallback(transcriptions)
-        if fallback_success:  # similarity >= 0.3
-            return "longest_fallback", fallback_reference, fallback_index
-        else:
-            # All strategies failed - transcriptions are incoherent
-            return "failed", fallback_reference, fallback_index 
+        fallback_success, fallback_reference, fallback_index, reference_metadata = get_longest_reference_fallback(transcriptions)
+        if fallback_success: return "longest_fallback", fallback_reference, fallback_index, reference_metadata
+        else: return "failed", fallback_reference, fallback_index , reference_metadata
 
     def align_transcriptions_to_reference(self, reference, reference_type, reference_index, transcriptions):
         """
@@ -329,11 +345,10 @@ class HybridEnsemble:
             ref_words = reference.split()
             
             # --- PHASE 1: SURVEY AND PAD THE REFERENCE ---
-            
             # Find all unique insertion points from other transcriptions
             insertion_map = {}
             for model_idx, transcription in enumerate(transcriptions):
-                if model_idx == reference_index or not transcription:
+                if model_idx == reference_index or not transcription: 
                     continue
                 
                 trans_words = transcription.split()
@@ -359,7 +374,6 @@ class HybridEnsemble:
             padded_ref_length = len(padded_ref_words)
 
             # --- PHASE 2: ALIGN ALL TRANSCRIPTIONS TO THE PADDED REFERENCE ---
-
             for model_index, transcription in enumerate(transcriptions):
                 alignment_result = {
                     'model_index': model_index,
@@ -381,8 +395,6 @@ class HybridEnsemble:
                         trans_words = transcription.split()
                         operations = ["<DELETE>"] * padded_ref_length
                         tokens = [None] * padded_ref_length
-                        
-                        # Use SequenceMatcher against the FLEXIBLE blueprint
                         matcher = SequenceMatcher(None, padded_ref_words, trans_words)
                         for op, ref_start, ref_end, trans_start, trans_end in matcher.get_opcodes():
                             if op == 'equal':
@@ -405,10 +417,14 @@ class HybridEnsemble:
                         
                         alignment_result['operations'] = operations
                         alignment_result['tokens'] = tokens
-                
                 alignment_results.append(alignment_result)
-                
-            return alignment_results
+
+            metadata = {
+                'original_reference_tokens': ref_words,
+                'adjusted_reference_tokens': padded_ref_words,
+                'insertion_map': insertion_map
+            }
+            return alignment_results, metadata
 
         def align_with_common_words_strategy(reference, transcriptions, reference_index=reference_index, reference_type=reference_type):
             """
@@ -513,10 +529,14 @@ class HybridEnsemble:
                         
                         alignment_result['operations'] = operations
                         alignment_result['tokens'] = tokens
-                
                 alignment_results.append(alignment_result)
-            
-            return alignment_results
+
+            metadata = {
+                'original_reference_tokens': ref_words,
+                'adjusted_reference_tokens': padded_ref_words,
+                'insertion_map': insertion_map
+            }
+            return alignment_results, metadata
         
         def align_with_longest_fallback_strategy(reference, transcriptions, reference_index=reference_index, reference_type=reference_type):
             """
@@ -602,22 +622,26 @@ class HybridEnsemble:
                         alignment_result['tokens'] = candidate_values
                 
                 alignment_results.append(alignment_result)
-            
-            return alignment_results
+            metadata = {
+                'original_reference_tokens': ref_words,
+                'adjusted_reference_tokens': ref_words.copy(), 
+                'model_weights': model_weights # This is the key metadata for this strategy
+            }
+            return alignment_results, metadata
         
         if reference is None or not transcriptions:
             return []
         if reference_type == "longest":
-            alignment_results = align_with_longest_strategy(reference=reference, transcriptions=transcriptions, reference_index=reference_index, reference_type=reference_type)
+            alignment_results, alignment_metadata = align_with_longest_strategy(reference=reference, transcriptions=transcriptions, reference_index=reference_index, reference_type=reference_type)
         elif reference_type == "common_words":
-            alignment_results = align_with_common_words_strategy(reference=reference, transcriptions=transcriptions, reference_index=reference_index, reference_type=reference_type)
+            alignment_results, alignment_metadata = align_with_common_words_strategy(reference=reference, transcriptions=transcriptions, reference_index=reference_index, reference_type=reference_type)
         elif reference_type == "longest_fallback":
-            alignment_results = align_with_longest_fallback_strategy(reference=reference, transcriptions=transcriptions, reference_index=reference_index, reference_type=reference_type)
+            alignment_results, alignment_metadata = align_with_longest_fallback_strategy(reference=reference, transcriptions=transcriptions, reference_index=reference_index, reference_type=reference_type)
         elif reference_type == "failed":
-            alignment_results = align_with_longest_fallback_strategy(reference=reference, transcriptions=transcriptions, reference_index=reference_index, reference_type=reference_type)
-        return alignment_results
+            alignment_results, alignment_metadata = align_with_longest_fallback_strategy(reference=reference, transcriptions=transcriptions, reference_index=reference_index, reference_type=reference_type)
+        return alignment_results, alignment_metadata
     
-    def voting_scheme(self, audio_path, alignment_results):
+    def voting_scheme(self, alignment_results):
         """
         Implement majority voting scheme for operations and random voting for tokens.
         
@@ -790,31 +814,12 @@ class HybridEnsemble:
             
             return sum(position_confidences) / total_positions
         
-        def create_metadata(alignment_results, fusion_operations):
-            """Create metadata about the voting results"""
-            return {
-                'reference_type': alignment_results[0]['reference_type'],
-                'total_keep': fusion_operations.count('<KEEP>'),
-                'total_replace': fusion_operations.count('<REPLACE>'),
-                'total_insert': fusion_operations.count('<INSERT>'),
-                'total_delete': fusion_operations.count('<DELETE>'),
-                'total_skip': fusion_operations.count('<SKIP>')
-            }
         
-        voting_result = {}
         if not alignment_results or len(alignment_results) == 0:
-            voting_result[audio_path] = {
-                "fusion_transcript": "",
-                "fusion_operations": [],
-                "fusion_tokens": [],
-                "candidates_tokens": [],
-                "voting_details": {},
-                "confidence_score": 0,
-                "total_models": 0,
-                "operations_length": 0,
-                "metadata": {},
+            return {
+                "fusion_transcript": "", "fusion_operations": [], "fusion_tokens": [],
+                "candidates_tokens": [], "voting_metadata": {"status": "No alignment results"}
             }
-            return voting_result
                 
         # Main voting logic
         operations_length = len(alignment_results[0]['operations'])
@@ -836,23 +841,32 @@ class HybridEnsemble:
         # Construct final results
         fusion_transcript = construct_final_transcription(fusion_operations, fusion_tokens)
         confidence_score = calculate_confidence_score(alignment_results, fusion_operations, fusion_tokens)
-        metadata = create_metadata(alignment_results, fusion_operations)
         candidates_tokens = [element["tokens"] for element in alignment_results]
-        voting_result[audio_path] = {
+        voting_metadata = {
+            'reference_type': alignment_results[0]['reference_type'],
+            'confidence_score': confidence_score,
+            'total_models': len(alignment_results),
+            'operations_length': operations_length,
+            'operation_counts': {
+                'total_keep': fusion_operations.count('<KEEP>'),
+                'total_replace': fusion_operations.count('<REPLACE>'),
+                'total_insert': fusion_operations.count('<INSERT>'),
+                'total_delete': fusion_operations.count('<DELETE>'),
+                'total_skip': fusion_operations.count('<SKIP>')
+            },
+            'voting_details': voting_details
+        }
+
+        return {
             "fusion_transcript": fusion_transcript,
             "fusion_operations": fusion_operations,
             "fusion_tokens": fusion_tokens,
             "candidates_tokens": candidates_tokens,
-            "voting_details": voting_details,
-            "confidence_score": confidence_score,
-            "total_models": len(alignment_results),
-            "operations_length": operations_length,
-            "metadata": metadata,
+            "voting_metadata": voting_metadata
         }
-        return voting_result
-
+        
     def llm_reinforcer(self, fusion_tokens, candidates_tokens, max_tokens, chunk_size, overlap):
-        def postprocess_reinforced_output(response: reinforcer.GeneratedResponse) -> Dict[str, Any]:
+        def postprocess_reinforced_output(response: reinforcer.GeneratedResponse) -> tuple:
             chunks = response.reinforced_results or []
             modifications = sum(1 for chunk in chunks if chunk.get("is_modified"))
             transcript_pieces = []
@@ -860,32 +874,30 @@ class HybridEnsemble:
                 if chunk.get("is_modified") and chunk.get("sentence"):
                     transcript_pieces.append(chunk["sentence"])
                 else:
-                    metadata = chunk.get("metadata", {})
-                    original_sentence = metadata.get("fusion_sentence", "")
+                    original_sentence = chunk.get("metadata", {}).get("fusion_sentence", "")
                     transcript_pieces.append(original_sentence)
 
             unwanted_values = [None, "None", "Null", "null", ""]
             filtered_pieces = [piece for piece in transcript_pieces if piece not in unwanted_values]
             llm_transcript = " ".join(filtered_pieces).strip()
-            return {
-                "llm_transcript": llm_transcript,
+            llm_metadata = {
                 "chunks": chunks,
                 "num_chunks": len(chunks),
                 "modifications": modifications,
                 "modification_ratio": modifications / len(chunks) if chunks else 0.0,
                 "is_chunked": response.is_chunked,
             }
+            
+            return llm_transcript, llm_metadata
 
         if not self.use_llm:
-            return {
-                "llm_transcript": "",
+            # Return an empty transcript and a default metadata object for consistency
+            llm_metadata = {
                 "llm_time": 0.0,
-                "chunks": [],
-                "num_chunks": 0,
-                "modifications": 0,
-                "modification_ratio": 0.0,
-                "is_chunked": False,
+                "status": "LLM reinforcement was disabled.",
+                "num_chunks": 0, "modifications": 0, "modification_ratio": 0.0
             }
+            return "", llm_metadata
         
         llm_start = time.time()
         response = self.REINFORCER.main(
@@ -896,29 +908,45 @@ class HybridEnsemble:
             overlap=overlap,
         )
         llm_time = time.time() - llm_start
-        llm_response = postprocess_reinforced_output(response)
-        llm_response["llm_time"] = llm_time
-        return llm_response
+        llm_transcript, llm_metadata = postprocess_reinforced_output(response)
+        llm_metadata["llm_time"] = llm_time
+        return llm_transcript, llm_metadata
 
     def main(self, **kwargs):
         def fuse_sample_transcriptions(audio_path, transcriptions):
             voting_start = time.time()
-            reference_type, reference, reference_index = self.get_reference_from_transcriptions(transcriptions)
-            alignment_results = self.align_transcriptions_to_reference(reference=reference, reference_type=reference_type, reference_index=reference_index,
-                                                                       transcriptions=transcriptions)
-            voting_result = self.voting_scheme(audio_path, alignment_results)
-            data = voting_result[audio_path]
-            data["voting_time"] = time.time() - voting_start
-            llm_response = self.llm_reinforcer(
-                fusion_tokens=data["fusion_tokens"],
-                candidates_tokens=data["candidates_tokens"],
+            reference_type, reference, reference_index, reference_metadata = self.get_reference_from_transcriptions(transcriptions)
+            alignment_results, alignment_metadata = self.align_transcriptions_to_reference(reference=reference, reference_type=reference_type, 
+                                                                                           reference_index=reference_index, transcriptions=transcriptions)
+            voting_output = self.voting_scheme(alignment_results)
+            llm_transcript, llm_metadata = self.llm_reinforcer(
+                fusion_tokens=voting_output["fusion_tokens"],
+                candidates_tokens=voting_output["candidates_tokens"],
                 max_tokens=kwargs.get("max_tokens", 25),
                 chunk_size=kwargs.get("chunk_size", 15),
                 overlap=kwargs.get("overlap", 3),
             )
-            data["llm_response"] = llm_response
-            voting_result[audio_path] = data
-            return voting_result
+            data = {
+                # --- Primary Outputs ---
+                "fusion_transcript": voting_output["fusion_transcript"],
+                "llm_transcript": llm_transcript,
+                
+                # --- Diagnostic/Internal Data ---
+                "fusion_operations": voting_output["fusion_operations"],
+                "fusion_tokens": voting_output["fusion_tokens"],
+                "candidates_tokens": voting_output["candidates_tokens"],
+                "voting_time": time.time() - voting_start,
+                
+                # --- Aggregated Metadata ---
+                "metadata": {
+                    "reference_selection": reference_metadata,
+                    "alignment": alignment_metadata,
+                    "voting": voting_output["voting_metadata"],
+                    "llm_reinforcement": llm_metadata  # <-- NEW metadata section
+                }
+            }
+            
+            return {audio_path: data}
 
         def process_item(item):
             key, value = item
@@ -943,7 +971,7 @@ class HybridEnsemble:
             return data["fusion_transcript"]
 
         def _eval_llm(data):
-            return data["llm_response"]["llm_transcript"]
+            return data["llm_transcript"]
 
         refs_lookup = {sample["audio_path"]: sample["normalized_transcription"] for sample in audios_chunk}
         all_audio_paths = list(self._samples_info.keys())

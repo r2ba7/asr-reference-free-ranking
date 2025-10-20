@@ -6,6 +6,7 @@ import torch
 from transformers import AutoProcessor, SeamlessM4Tv2Model, pipeline, SeamlessM4TProcessor, SeamlessM4Tv2ForSpeechToText
 from tqdm import tqdm
 import numpy as np
+import pandas as pd
 
 from . import LOGGER
 from stt_benchmarking.utils import (
@@ -15,6 +16,18 @@ from stt_benchmarking.utils import (
     metrics
 )
     
+def map_to_seamless_lang(accent):
+    if not accent or pd.isna(accent) or str(accent).strip() == "":
+        return "arb"
+    a = accent.lower()
+    if any(x in a for x in ["fusha", "فصح", "msa", "standard", "العربية", "فصحى", "فصحة"]):
+        return "arb"
+    if any(x in a for x in ["egypt", "مصري", "مصرية", "arz", "egyptian"]):
+        return "arz"
+    if any(x in a for x in ["darija", "maghreb", "magherbine", "morro", "تطوان", "مغربية", "تونس", "الجزائر", "شمال أفريقيا"]):
+        return "ary"
+    return "arb"
+
 class SeamlessM4TFullInterface:
     """
     A class for loading and running inference with Seamless M4T models using Pipeline.
@@ -103,7 +116,7 @@ class SeamlessM4TFullInterface:
         return pipe
 
     @decorators.Decorators.calculate_execution_time 
-    def run_inference_one_by_one(self, records, language_ids):
+    def run_inference_one_by_one(self, records, lang_id):
         """
         Run inference on audio records one by one and compute metrics.
         
@@ -120,26 +133,20 @@ class SeamlessM4TFullInterface:
             transcription = record["transcription"]
             normalized_transcription = record["normalized_transcription"]
             duration = record["audio_duration"]
+            accent = record.get("accent", None)
+            if lang_id is None:
+                lang_id = map_to_seamless_lang(accent)
             all_audio_paths.append(audio_path)
             try:
                 start_time = time.time()
-                best_prediction = None
-                best_wer = float('inf')
                 inputs = self.processor(
                     audios=waveform,
                     sampling_rate=record['sample_rate'],
                     return_tensors="pt"
                 ).to(self.device, dtype=self.dtype)
-                for lang_id in language_ids:
+                with torch.no_grad():
                     output_tokens = self.model.generate(**inputs, tgt_lang=lang_id) 
-                    raw_prediction = self.processor.decode(output_tokens[0], skip_special_tokens=True)
-                    candidate_normalized = text_processing.StandardArabicTextProcessor.main(raw_prediction, substitute=True)
-                    sample_wer = metrics.BasicSTTMetrics.evaluate(refs=normalized_transcription, hyps=candidate_normalized)["word_error_rate"]["wer (%)"]
-                    if sample_wer < best_wer:
-                        best_wer = sample_wer
-                        best_prediction = raw_prediction
-                
-                raw_prediction = best_prediction
+                raw_prediction = self.processor.decode(output_tokens[0], skip_special_tokens=True)
                 inference_time = time.time() - start_time
                 if self._processed_count > 4:
                     self._total_inference_time += inference_time
@@ -164,7 +171,7 @@ class SeamlessM4TFullInterface:
         self._finalize_info(all_audio_paths=all_audio_paths)
     
     @decorators.Decorators.calculate_execution_time
-    def run_batch_inference(self, records,):
+    def run_batch_inference(self, records, lang_id):
         """
         Run batch inference using Hugging Face Dataset for better efficiency.
         Selects best language by evaluating on a sample subset.
@@ -177,12 +184,14 @@ class SeamlessM4TFullInterface:
         def process_batch(batch):
             batch_audio = batch["waveform"]
             batch_audio = [np.array(audio, dtype=np.float32) if not isinstance(audio, np.ndarray) else audio for audio in batch_audio]
+            if lang_id is None:
+                lang_id = "arb"
             with torch.no_grad():
                 try:
                     results = self.pipe(
                         batch_audio,
                         batch_size=len(batch_audio),
-                        generate_kwargs={"tgt_lang": "arb", 
+                        generate_kwargs={"tgt_lang": lang_id, 
                                         "num_beams": 4,
                                         "do_sample": False,
                                         "no_repeat_ngram_size": 2}
@@ -263,7 +272,7 @@ class SeamlessM4TFullInterface:
         self._finalize_info(all_audio_paths=all_audio_paths)
 
     @decorators.Decorators.calculate_execution_time
-    def run_inference_optimized(self, records, language_ids=["arb", "ary", "arz"], duration_threshold=30.0):
+    def run_inference_optimized(self, records, lang_id=None, duration_threshold=30.0):
         """
         Run inference using the best method depending on audio length.
         
@@ -280,11 +289,11 @@ class SeamlessM4TFullInterface:
 
         if short_records:
             LOGGER.info(f"Running one-by-one inference on {len(short_records)} short files (<{duration_threshold}s)")
-            self.run_inference_one_by_one(short_records, language_ids)
+            self.run_inference_one_by_one(short_records, lang_id)
 
         if long_records:
             LOGGER.info(f"Running batch inference on {len(long_records)} long files (≥{duration_threshold}s)")
-            self.run_batch_inference(long_records, language_ids)
+            self.run_batch_inference(long_records, lang_id)
 
         refs = [v["normalized_transcription"] for v in self._samples_info.values()]
         hyps = [v["normalized_prediction"] for v in self._samples_info.values()]

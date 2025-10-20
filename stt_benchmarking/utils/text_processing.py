@@ -28,7 +28,9 @@ class StandardArabicTextProcessor:
         'ڤ': 'ف',
         'ؤ': 'و',
         'ئ': 'ي',
-        'ء': ''
+        'ء': '',
+        'ىٰ': 'ي',
+        'ى': 'ي'
     }
     
     # Arabic diacritics to remove (Unicode points for common Arabic diacritics)

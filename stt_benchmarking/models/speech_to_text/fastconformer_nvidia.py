@@ -65,12 +65,10 @@ class FastConformerInference:
                     output = self.model.transcribe([audio_path], verbose=False, batch_size=64)
                 raw_prediction = output[0].text
                 inference_time = time.time() - start_time
-                # Track timing (skip first 5 for warmup)
                 if self._processed_count > 4:
                     self._total_inference_time += inference_time
                     self._total_audio_duration += duration
                 
-                # Track memory (all samples)
                 self._processed_count += 1
             except Exception as e:
                 LOGGER.error(f"Sample {i+1}, Name: {audio_path}, failed: {e}")

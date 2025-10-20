@@ -1,3 +1,6 @@
+import gc
+import time
+
 import torch
 from transformers import AutoProcessor, AutoModelForCTC
 from tqdm import tqdm
@@ -6,7 +9,8 @@ from .. import LOGGER
 from stt_benchmarking.utils import (
     text_processing, 
     decorators, 
-    metrics
+    metrics,
+    helpers
 )
 
 class w2vBERTInference:
@@ -22,6 +26,9 @@ class w2vBERTInference:
         self.dtype = self.model.dtype
         self._overall_metrics = None
         self._samples_info = {}
+        self._total_inference_time = 0.0
+        self._total_audio_duration = 0.0
+        self._processed_count = 0
 
     def _load_model(self):
         """
@@ -50,19 +57,18 @@ class w2vBERTInference:
             records (list): List of audio records containing waveform, sample_rate, 
                           transcription, and audio_path
         """
-        all_refs_normalized = []
-        all_hyps = []
         all_audio_paths = []
-        if not isinstance(records, list):
-            records = [records]
-            
+        if not isinstance(records, list): records = [records]
         for i, record in tqdm(enumerate(records), total=len(records), desc="Processing Records"):
-            waveform = record["waveform"]
             audio_path = record['audio_path']
             transcription = record['transcription']
             normalized_transcription = record['normalized_transcription']
+            duration = record["audio_duration"]
+            waveform = record["waveform"]
             all_audio_paths.append(audio_path)
             try:
+                # Time inference
+                start_time = time.time()
                 inputs = self.processor(
                     audio=waveform,
                     sampling_rate=record['sample_rate'],
@@ -74,25 +80,29 @@ class w2vBERTInference:
 
                 predicted_ids = torch.argmax(logits, dim=-1)
                 raw_prediction = self.processor.decode(predicted_ids[0])
-
+                inference_time = time.time() - start_time
+                if self._processed_count > 4:
+                    self._total_inference_time += inference_time
+                    self._total_audio_duration += duration
+                
+                self._processed_count += 1
             except Exception as e:
-                LOGGER.error(f"⚠️ Sample {i+1}, Name: {record['audio_path']}, failed: {e}")
+                LOGGER.error(f"Sample {i+1}, Name: {audio_path}, failed: {e}")
+                inference_time = None
                 raw_prediction = ""
 
-            all_refs_normalized.append(normalized_transcription)
-            all_hyps.append(raw_prediction)
             self._samples_info[audio_path] = {
                 "raw_transcription": transcription,
                 "normalized_transcription": normalized_transcription,
                 "raw_prediction": raw_prediction,
                 "normalized_prediction": None,
+                "duration": duration,
+                "inference_time": inference_time,
+                "rtf": inference_time / duration if (inference_time and duration > 0) else None,
             }
-
-        all_hyps_normalized = text_processing.StandardArabicTextProcessor.normalize_texts(all_hyps, substitute=True)
-        self._finalize_info(all_audio_paths=all_audio_paths, all_refs_normalized=all_refs_normalized, all_hyps_normalized=all_hyps_normalized)
-        self._overall_metrics = metrics.BasicSTTMetrics.evaluate(refs=all_refs_normalized, hyps=all_hyps_normalized)
-
-    def _finalize_info(self, all_audio_paths, all_refs_normalized, all_hyps_normalized):
+                
+        self._finalize_info(all_audio_paths=all_audio_paths)
+    def _finalize_info(self, all_audio_paths):
         """
         Finalize predictions by normalizing them and computing metrics for each sample.
 
@@ -104,83 +114,84 @@ class w2vBERTInference:
         for i, audio_path in enumerate(all_audio_paths):
             if audio_path in self._samples_info:
                 try:
-                    self._samples_info[audio_path]["normalized_prediction"] = all_hyps_normalized[i]
+                    prediction = self._samples_info[audio_path]["raw_prediction"]
+                    self._samples_info[audio_path]["normalized_prediction"] = text_processing.StandardArabicTextProcessor.main(prediction, substitute=True)
                     sample_metrics = metrics.BasicSTTMetrics.evaluate(
-                        refs=all_refs_normalized[i],
-                        hyps=all_hyps_normalized[i],
+                        refs=self._samples_info[audio_path]["normalized_transcription"],
+                        hyps=self._samples_info[audio_path]["normalized_prediction"],
                     )
                     self._samples_info[audio_path]["metrics"] = sample_metrics
                 except Exception as e:
                     LOGGER.error(f"Error processing sample {i+1}, Name: {audio_path}, failed: {e}")
-                    self._samples_info[audio_path]["metrics"] = {
-                        "word_error_rate": {
-                            "wer (%)": None,
-                            "substitutions": None,
-                            "deletions": None,
-                            "insertions": None,
-                            "hits": None,
-                        },
-                        "character_error_rate": {
-                            "cer (%)": None,
-                            "substitutions": None,
-                            "deletions": None,
-                            "insertions": None,
-                            "hits": None,
-                        },
+                    self._samples_info[audio_path] = {
+                        "normalized_prediction": None,
+                        "metrics":  helpers._empty_metrics()
                     }
-                    continue
             else:
                 self._samples_info[audio_path] = {
                     "normalized_prediction": None,
-                    "metrics": {
-                        "word_error_rate": {
-                            "wer (%)": None,
-                            "substitutions": None,
-                            "deletions": None,
-                            "insertions": None,
-                            "hits": None,
-                        },
-                        "character_error_rate": {
-                            "cer (%)": None,
-                            "substitutions": None,
-                            "deletions": None,
-                            "insertions": None,
-                            "hits": None,
-                        },
-                    },
+                    "metrics":  helpers._empty_metrics()
                 }
+
+        refs = [v["normalized_transcription"] for v in self._samples_info.values()]
+        hyps = [v["normalized_prediction"] for v in self._samples_info.values()]
+        self._overall_metrics = metrics.BasicSTTMetrics.evaluate(refs=refs, hyps=hyps)
+                
+    def get_performance_summary(self):
+        """Return performance metrics dict"""
+        if self._total_audio_duration == 0:
+            return None
         
+        return {
+            "average_rtf": self._total_inference_time / self._total_audio_duration if self._total_audio_duration > 0 else None,
+            "total_inference_time": self._total_inference_time,
+            "total_audio_duration": self._total_audio_duration,
+            "processed_samples": self._processed_count
+        }
+
     def summary_of_evaluation(self):
         """
         Display a simple summary of the overall evaluation metrics.
         """
-        if not hasattr(self, 'overall_metrics') or not self._overall_metrics:
+        if not self._overall_metrics:
             LOGGER.warning("No evaluation metrics available. Run inference first.")
             return
-        
+
         LOGGER.info("Overall Evaluation Summary:")
         for k, v in self._overall_metrics.items():
             LOGGER.info(f"{k}: {v}")
         
-    @property
-    def overall_metrics(self):
-        return self._overall_metrics
+        # Add performance metrics
+        perf = self.get_performance_summary()
+        if perf:
+            LOGGER.info(f"Average RTF: {perf['average_rtf']:.4f}")
+            LOGGER.info(f"Total Inference Time: {perf['total_inference_time']:.2f}s")
+            LOGGER.info(f"Total Audio Duration: {perf['total_audio_duration']:.2f}s")
+            LOGGER.info(f"Processed Samples: {perf['processed_samples']}")
+
+    def reset(self):
+        """
+        Reset the inference results and metrics without reinitializing the model.
+        This clears all stored results from previous inference runs while keeping
+        the loaded model intact.
+        """
+        self._overall_metrics = None
+        self._samples_info = {}
+        self._total_inference_time = 0.0
+        self._total_audio_duration = 0.0
+        self._processed_count = 0
+        gc.collect()
+        if self.device == "cuda":
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+            torch.cuda.reset_peak_memory_stats()
+    
+        LOGGER.info("W2v Bert instance has been reset. Model and processor remain loaded.")
 
     @property
     def samples_info(self):
         return self._samples_info
-
-    def reset(self):
-        import gc
-        
-        self._overall_metrics = None
-        self._samples_info = {}
-        
-        # Optional: Clear GPU cache if using CUDA
-        gc.collect()
-        if self.device.type == "cuda":
-            torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
-            torch.cuda.reset_peak_memory_stats()
-        
-        LOGGER.info("W2v Bert instance has been reset. Model and processor remain loaded.")
+    
+    @property
+    def overall_metrics(self):
+        return self._overall_metrics

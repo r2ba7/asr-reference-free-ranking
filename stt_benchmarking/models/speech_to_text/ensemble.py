@@ -19,17 +19,31 @@ from stt_benchmarking.models.llms import reinforcer
 from . import LOGGER
 
 class HybridEnsemble:
-    def __init__(self, use_llm, perfection_rule_length=5, dynamic_match_percentage=0.8):
+    def __init__(self, use_llm, mode="conservative", perfection_rule_length=5, dynamic_match_percentage=0.8):
         self.use_llm = use_llm
         if self.use_llm:
             self._initialize_llm()
 
         self.perfection_rule_length = perfection_rule_length
         self.dynamic_match_percentage = dynamic_match_percentage
+        self.priority_order = self._voting_priority(mode)
         self._input_to_fusion = {}
         self._samples_info = {}
         self._processed_results = []
         self._overall_metrics = None
+        LOGGER.info(f"Using the following parameters, perfection_rule_length: {self.perfection_rule_length}, dynamic_match_percentage: {self.dynamic_match_percentage}, priority_order: {self.priority_order}")
+
+    def _voting_priority(self, mode):
+        if mode.lower() == "conservative":
+            priority_order = ["<KEEP>", "<REPLACE>", "<DELETE>", "<SKIP>", "<INSERT>"]
+        elif mode.lower() == "aggressive":
+            priority_order = ["<REPLACE>", "<KEEP>", "<INSERT>", "<DELETE>", "<SKIP>"]
+        # reference
+        elif mode.lower() == "reference":
+            priority_order = ["<KEEP>", "<SKIP>", "<REPLACE>", "<INSERT>", "<DELETE>"]
+        else:
+            raise ValueError("mode should be one of the following: [conservative, aggressive, reference]")
+        return priority_order
 
     def _initialize_llm(self):
         self.REINFORCER = reinforcer.FusionReinforcer()
@@ -66,39 +80,6 @@ class HybridEnsemble:
 
         # Collect all unique audio paths
         all_audio_paths = sorted({path for d in samples_dicts for path in d.keys()})
-        # all_audio_paths = ['../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0873.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0885.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0898.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0980.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0667.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0681.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0714.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0687.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0899.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0643.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0826.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0849.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHameed-AlAkhrass-228-0171.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulQader-Shohaib-208-0387.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulQader-Shohaib-208-0443.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulQader-Shohaib-208-0493.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulQader-Shohaib-208-0594.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulRahman-AlBarr-334-0635.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulRahman-AlBarr-334-0644.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulRahman-AlBarr-334-0395.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\Abdullateef-Wahba-158-0388.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0886.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0975.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulMawjood-Lotfi-268-0157.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulMonaem-Hussain-321-0217.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulRahman-AlBarr-334-0835.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\AboAlwafa-Bawaab-184-0639.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\Ads-girl3-153-0915.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0930.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0846.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\AbdulHakeem-AbdulNasser-338-0870.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\Abdullah-Badran-295-0231.wav',
-        #                 '../data/original/Egy_Coll_5hrs/waves\\Adel-Imam-346-2098.wav']
         # Build combined dict
         combined = {}
         for audio_path in all_audio_paths:
@@ -162,7 +143,6 @@ class HybridEnsemble:
             "min_required": min_required
         }
 
-    # Done reference
     def get_reference_from_transcriptions(self, transcriptions):
         def get_longest_reference(transcriptions):
             valid_transcriptions = [(i, t) for i, t in enumerate(transcriptions) if t is not None]
@@ -677,16 +657,7 @@ class HybridEnsemble:
             max_count = operation_counts.most_common(1)[0][1]
             tied_operations = [op for op, count in operation_counts.items() if count == max_count]
             if len(tied_operations) > 1:
-                # Current: Conservative (prefer minimal change)
-                # priority_order = ["<KEEP>", "<REPLACE>", "<DELETE>", "<SKIP>", "<INSERT>"]
-
-                # # Aggressive: Prefer correction over preservation
-                # priority_order = ["<REPLACE>", "<KEEP>", "<INSERT>", "<DELETE>", "<SKIP>"]
-
-                # # Reference-biased: Trust original alignment
-                # priority_order = ["<KEEP>", "<SKIP>", "<REPLACE>", "<INSERT>", "<DELETE>"]
-                priority_order = ["<KEEP>", "<REPLACE>", "<DELETE>", "<SKIP>", "<INSERT>"]
-                for preferred_op in priority_order:
+                for preferred_op in self.priority_order:
                     if preferred_op in tied_operations:
                         majority_operation = preferred_op
                         break

@@ -10,7 +10,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from stt_benchmarking.utils import text_processing, helpers, metrics
 from . import LOGGER
 
-
 class ROVEREnsemble:
     """
     ROVER (Recognizer Output Voting Error Reduction) implementation.
@@ -49,7 +48,6 @@ class ROVEREnsemble:
         
         all_audio_paths = sorted({path for d in samples_dicts for path in d.keys()})
         combined = {}
-        
         for audio_path in all_audio_paths:
             combined[audio_path] = []
             for d in samples_dicts:
@@ -371,15 +369,12 @@ class ROVEREnsemble:
         """
         Evaluate fusion results against ground truth.
         """
-        refs_lookup = {sample["audio_path"]: sample["normalized_transcription"] 
-                      for sample in audios_chunk}
-        
+        refs_lookup = {sample["audio_path"]: sample["normalized_transcription"] for sample in audios_chunk}
         for audio_path in list(self._fusion_results.keys()):
             if audio_path in self._fusion_results:
                 try:
-                    ref = refs_lookup.get(audio_path)
+                    ref = refs_lookup[audio_path]
                     hyp = self._fusion_results[audio_path]["fusion_transcript"]
-                    
                     norm_hyp = text_processing.StandardArabicTextProcessor.main(
                         hyp, substitute=True)
                     
@@ -404,7 +399,6 @@ class ROVEREnsemble:
                     "normalized_prediction": None,
                     "metrics": helpers._empty_metrics()
                 }
-        
         # Overall metrics
         refs = [v["normalized_transcription"] for v in self._fusion_results.values()]
         hyps = [v["normalized_prediction"] for v in self._fusion_results.values()]

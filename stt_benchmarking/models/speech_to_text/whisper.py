@@ -16,8 +16,6 @@ from stt_benchmarking.utils import (
     text_processing
 )
 
-
-
 class FasterWhisperInference:
     """
     A class for loading and running inference with FasterWhisper models.

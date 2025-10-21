@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 import os
 import Levenshtein  # Required for edit distance guardrail. Install with: pip install python-Levenshtein
 import re
+from collections import Counter
 
 from openai import OpenAI
 
@@ -18,6 +19,254 @@ class GeneratedResponse(BaseModel):
     reinforced_results: List[Optional[Dict]]
     is_chunked: bool
 
+
+class TokenReinforcer:
+    CLIENT = OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=os.getenv("OPENROUTER_API_KEY"),
+    ) 
+    MAX_RETRIES = 0
+
+    def __init__(self):
+        print(1)
+
+    def extract_candidates_at_position(self, alignment_results, position):
+        """
+        Extract all tokens at position including None values.
+        
+        Args:
+            alignment_results: list of alignment dicts
+            position: index position
+            
+        Returns:
+            list of dicts with token and metadata
+        """
+        candidates = []
+        for result in alignment_results:
+            token = result['tokens'][position]
+            candidates.append({
+                'token': token,
+                'model_index': result['model_index'],
+                'is_reference': result['is_reference'],
+                'operation': result['operations'][position]
+            })
+        
+        return candidates
+    
+    def _extract_candidates_for_selection(self, candidates):
+        """
+        Extract tokens for LLM selection, keeping None to represent no token.
+        
+        Args:
+            candidates: list of candidate dicts
+            
+        Returns:
+            dict with tokens list and metadata
+        """
+        # Extract all tokens including None
+        all_tokens = [c['token'] for c in candidates]
+        token_counts = Counter(all_tokens)
+        
+        # Check for reference
+        reference_token = None
+        has_reference = False
+        for c in candidates:
+            if c['is_reference']:
+                reference_token = c['token']
+                has_reference = True
+                break
+        
+        # Get unique tokens (None included)
+        unique_tokens = list(token_counts.keys())
+        return {
+            'unique_tokens': unique_tokens,
+            'has_reference': has_reference,
+            'reference_token': reference_token,
+            'token_counts': dict(token_counts),
+            'total_models': len(candidates),
+            'has_none': None in unique_tokens,
+            'none_count': token_counts.get(None, 0)
+        }
+        
+    def _llm_token_selection(self, position, candidate_info):
+        """
+        Use LLM to select best token from candidates based on reference and votes.
+        
+        Args:
+            position: current position index
+            candidate_info: dict from _extract_candidates_for_selection
+            
+        Returns:
+            dict with selection result and metadata
+        """
+        
+        unique_tokens = candidate_info['unique_tokens']
+        
+        # Handle cases with 0 or 1 unique candidate
+        if not unique_tokens:
+            return {
+                "position": position,
+                "selected_token": None,
+                "metadata": {
+                    "candidate_info": candidate_info, 
+                    "reason": "No candidates available"
+                }
+            }
+        
+        if len(unique_tokens) == 1:
+            return {
+                "position": position,
+                "selected_token": unique_tokens[0],
+                "metadata": {
+                    "candidate_info": candidate_info, 
+                    "reason": "Single unique candidate - no selection needed"
+                }
+            }
+        
+        base_rules = """
+            You are a precise token selector for Arabic ASR fusion outputs. Your only task is to select the single best word from a list of noisy ASR candidates. You are acting as a voter.
+
+            **Rules:**
+            1. You MUST select exactly ONE option from the `candidates` list. The candidate `None` (represented as `null` in JSON) is a valid choice and means "select no word" (a deletion).
+            2. Your selected word MUST be one of the provided candidates - no modifications.
+            3. A `reference_token` is provided. This token is considered highly reliable. You should select the `reference_token` as the default choice.
+            4. **CRITICAL EXCEPTION:** Only deviate from the `reference_token` if it is *clearly* and *unambiguously* incorrect (e.g., a nonsensical word) AND another candidate from the list is a *much* better fit.
+            5. If `reference_token` is `null`, select the best candidate from the list, considering the `token_counts` as votes. The highest count is a strong signal.
+
+            Input JSON:
+            {
+            "candidates": ["<word1>", "<word2>", null, ...],
+            "reference_token": "<word_or_null>",
+            "token_counts": {"<word1>": <count>, "<word2>": <count>, "null": <count>, ...}
+            }
+
+            Output JSON (Strict Schema):
+            {
+            "selected_token": "<exact word from candidates or null>"
+            }
+        """
+        
+        # json.dumps converts Python None to JSON null automatically
+        input_payload = {
+            "candidates": candidate_info['unique_tokens'],
+            "reference_token": candidate_info['reference_token'],
+            "token_counts": candidate_info['token_counts']
+        }
+        
+        prompt = f"{base_rules}\n\nInput:\n{json.dumps(input_payload, ensure_ascii=False, indent=2)}"
+        
+        for attempt in range(self.MAX_RETRIES + 1):
+            try:
+                completion = self.CLIENT.chat.completions.create(
+                    model="google/gemini-2.5-flash",
+                    temperature=0.0,
+                    messages=[{"role": "user", "content": prompt}],
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "TokenSelector",
+                            "strict": True,
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "selected_token": {"type": ["string", "null"]}
+                                },
+                                "required": ["selected_token"],
+                                "additionalProperties": False
+                            }
+                        }
+                    }
+                )
+                
+                response_text = completion.choices[0].message.content
+                response = json.loads(response_text)
+                # Validate that the LLM's choice is one of the unique tokens
+                if response["selected_token"] not in unique_tokens:
+                    LOGGER.warning(f"LLM selected invalid token '{response['selected_token']}' at pos {position}. Falling back.")
+                    
+                    # FALLBACK 1: Trust the reference
+                    if candidate_info['has_reference']:
+                        response["selected_token"] = candidate_info['reference_token']
+                        reason = "Fallback: LLM selection was invalid. Using reference_token."
+                    else:
+                        # FALLBACK 2: No reference, use first unique token
+                        response["selected_token"] = unique_tokens[0]
+                        reason = "Fallback: LLM selection was invalid. No reference, using first unique candidate."
+                else:
+                    reason = "LLM selection" # Valid selection
+                
+                return {
+                    "position": position,
+                    "selected_token": response["selected_token"],
+                    "metadata": {
+                        "candidate_info": candidate_info,
+                        "reason": reason
+                    }
+                }
+                
+            except json.JSONDecodeError as e:
+                LOGGER.warning(f"LLM returned malformed JSON on attempt {attempt + 1} at pos {position}: {e}")
+                if attempt >= self.MAX_RETRIES:
+                    break
+                    
+            except Exception as e:
+                LOGGER.error(f"LLM token selection failed on attempt {attempt + 1} at pos {position}: {e}")
+                if attempt >= self.MAX_RETRIES:
+                    break
+        
+        # FINAL FALLBACK (API/JSON errors): Trust the reference
+        if candidate_info['has_reference']:
+            fallback_token = candidate_info['reference_token']
+            fallback_reason = "Fallback: API/JSON errors. Using reference_token."
+        else:
+            fallback_token = unique_tokens[0]
+            fallback_reason = "Fallback: API/JSON errors. No reference, using first unique candidate."
+            
+        return {
+            "position": position,
+            "selected_token": fallback_token,
+            "metadata": {
+                "candidate_info": candidate_info,
+                "prompt": prompt,
+                "reason": fallback_reason
+            }
+        }
+
+    def main(self, alignment_results):
+        if not alignment_results:
+            return {
+                "selected_tokens": [],
+                "selection_metadata": []
+            }
+        
+        sequence_length = len(alignment_results[0]['tokens'])
+        selected_tokens = []
+        selection_metadata = []
+        
+        for position in range(sequence_length):
+            # 1. Get all candidate data for the current position
+            current_candidates_data = self.extract_candidates_at_position(alignment_results, position)
+            
+            # 2. Process data to get unique tokens, reference, and counts
+            candidate_info = self._extract_candidates_for_selection(current_candidates_data)
+            
+            # 3. Pass this structured info to the LLM voter
+            selection_result = self._llm_token_selection(
+                position=position,
+                candidate_info=candidate_info
+            )
+            
+            # (Optional) Print statements for debugging
+            # print(f"--- Position {position} ---")
+            # print(f"Candidate Info: {candidate_info}")
+            # print(f"Selection Result: {selection_result['selected_token']} (Reason: {selection_result['reasoning']})")
+            selected_tokens.append(selection_result["selected_token"])
+            selection_metadata.append(selection_result)
+
+        return {
+            "selected_tokens": selected_tokens,
+            "selection_metadata": selection_metadata
+        }
 
 class FusionReinforcer:
     CLIENT = OpenAI(
@@ -142,25 +391,20 @@ class FusionReinforcer:
                 salvaged_data = {}
                 
                 # 1. Extract 'reasoning'
-                # Pattern looks for "reasoning":" and captures everything until the next key ("sentence")
-                reasoning_match = re.search(r'"reasoning"\s*:\s*"(.+?)(?=","sentence"|})', malformed_string, re.DOTALL)
+                # Pattern looks for "reasoning":" and captures everything until the next key ("selected_token")
+                reasoning_match = re.search(r'"reasoning"\s*:\s*"(.+?)(?=","selected_token"|})', malformed_string, re.DOTALL)
                 if reasoning_match:
                     salvaged_data['reasoning'] = reasoning_match.group(1).strip()
 
-                # 2. Extract 'sentence' (this is often the broken one)
-                # Pattern looks for "sentence":" and captures everything until the next key ("is_modified")
-                sentence_match = re.search(r'"sentence"\s*:\s*"(.+?)(?=","is_modified"|})', malformed_string, re.DOTALL)
-                if sentence_match:
+                # 2. Extract 'selected_token' (this is often the broken one)
+                # Pattern looks for "selected_token":" and captures everything until end or closing brace
+                token_match = re.search(r'"selected_token"\s*:\s*"(.+?)(?="|})', malformed_string, re.DOTALL)
+                if token_match:
                     # Clean up potential trailing characters if the string was unterminated
-                    salvaged_data['sentence'] = sentence_match.group(1).strip().rstrip('"').rstrip(',')
+                    salvaged_data['selected_token'] = token_match.group(1).strip().rstrip('"').rstrip(',')
 
-                # 3. Extract 'is_modified' (usually a boolean)
-                modified_match = re.search(r'"is_modified"\s*:\s*(true|false)', malformed_string)
-                if modified_match:
-                    salvaged_data['is_modified'] = modified_match.group(1) == 'true'
-
-                # 4. Validate the salvaged data
-                if all(key in salvaged_data for key in ['reasoning', 'sentence', 'is_modified']):
+                # 3. Validate the salvaged data
+                if all(key in salvaged_data for key in ['reasoning', 'selected_token']):
                     LOGGER.warning("Successfully salvaged a broken JSON response.")
                     return salvaged_data
                     

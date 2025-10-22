@@ -109,7 +109,6 @@ class BasicSTTMetrics:
     @staticmethod
     def evaluate(refs, hyps):
         refs, hyps = BasicSTTMetrics._normalize_inputs(refs, hyps)
-        
         return {
             "word_error_rate": BasicSTTMetrics.wer_details(refs, hyps),
             "character_error_rate": BasicSTTMetrics.cer_details(refs, hyps),

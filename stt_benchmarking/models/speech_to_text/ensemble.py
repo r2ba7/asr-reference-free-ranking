@@ -1,11 +1,12 @@
 from difflib import SequenceMatcher
 from collections import Counter, OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 import time
 import hashlib
 import difflib
 import os
+import math
 
 import numpy as np
 from tqdm import tqdm
@@ -15,10 +16,130 @@ from scipy.cluster.hierarchy import linkage, fcluster
 from scipy.spatial.distance import squareform
 from kneed import KneeLocator
 
+
 from stt_benchmarking.utils import text_processing, helpers, metrics
 from stt_benchmarking.models.llms import reinforcer
 from . import LOGGER
 
+class TranscriptFilter:
+    """
+    Implements a two-stage hybrid filter for transcripts.
+    
+    - Stage 1: Perplexity filter to remove linguistic noise.
+    - Stage 2: Clustering filter to find consensus and remove outliers.
+    """
+    
+    def _differentiator_threshold(self, merge_distances):
+        jumps = np.diff(merge_distances)
+        if len(jumps) == 0: return None
+        jump_index = np.argmax(jumps)
+        last_good_distance = merge_distances[jump_index]
+        first_bad_distance = merge_distances[jump_index + 1]
+        return (last_good_distance + first_bad_distance) / 2
+    
+    def _word_sequence_ratio(self, words1: List[str], words2: List[str]) -> float:
+        """Calculates the similarity ratio (0-100) based on matching *words*."""
+        if not words1 and not words2: return 100.0
+        if not words1 or not words2: return 0.0
+        matcher = difflib.SequenceMatcher(None, words1, words2)
+        return matcher.ratio() * 100.0
+        
+    def _calculate_similarity_matrix(self, transcriptions: List[str]) -> pd.DataFrame:
+        """Creates an N*N pairwise similarity matrix for all transcriptions."""
+        num_systems = len(transcriptions)
+        tokenized_trans = [t.split() for t in transcriptions]
+        df_similarity = pd.DataFrame(index=range(num_systems), columns=range(num_systems), dtype=float)
+        for i in range(num_systems):
+            for j in range(i, num_systems):
+                if i == j:
+                    similarity = 100.0
+                else:
+                    similarity = self._word_sequence_ratio(tokenized_trans[i], tokenized_trans[j])
+                
+                df_similarity.loc[i, j] = similarity
+                df_similarity.loc[j, i] = similarity
+        return df_similarity
+    
+    def main(self, transcriptions: List[str]) -> Tuple[List[str], Dict[str, Any]]:
+        """
+        Filters transcripts by pairwise agreement with dynamic threshold detection.
+        
+        Finds natural gap in agreement scores to separate high-agreement from low-agreement.
+        """
+        num_transcriptions = len(transcriptions)
+        
+        if num_transcriptions < 3:
+            return transcriptions, {
+                "status": "Skipped", 
+                "reason": "Need ≥3 transcripts",
+                "kept_indices": list(range(num_transcriptions)), 
+                "filtered_indices": []
+            }
+        
+        # Build similarity matrix
+        similarity_matrix = self._calculate_similarity_matrix(transcriptions).values
+        agreement_scores = []
+        for i in range(num_transcriptions):
+            others_similarity = np.concatenate([similarity_matrix[i, :i], similarity_matrix[i, i+1:]])
+            agreement_scores.append(np.mean(others_similarity))
+        
+        agreement_scores = np.array(agreement_scores)
+        # Check for uniform scores
+        if len(np.unique(agreement_scores)) == 1:
+            return transcriptions, {
+                "status": "Skipped",
+                "reason": "All transcripts have identical agreement",
+                "kept_indices": list(range(num_transcriptions)),
+                "filtered_indices": []
+            }
+        
+        # Sort scores to find gaps
+        sorted_indices = np.argsort(agreement_scores)
+        sorted_scores = agreement_scores[sorted_indices]
+        gaps = np.diff(sorted_scores)
+        significant_gaps = np.where(gaps > np.mean(gaps) + np.std(gaps))[0]
+        # gap_median = np.median(gaps)
+        # gap_mad = np.median(np.abs(gaps - gap_median))
+        # significant_gaps = np.where(gaps > gap_median + 2 * gap_mad)[0]
+        # significant_gaps = np.where(gaps > np.median(gaps))[0]
+        if len(significant_gaps) == 0:
+            return transcriptions, {
+                "status": "Skipped",
+                "reason": "Cannot compute gaps",
+                "kept_indices": list(range(num_transcriptions)),
+                "filtered_indices": []
+            }
+        
+        
+        first_gap_idx = significant_gaps[0]
+        dynamic_threshold = sorted_scores[first_gap_idx + 1]
+
+        # Everything below threshold = noise, remove it
+        kept_indices = np.where(agreement_scores >= dynamic_threshold)[0]
+        filtered_indices = np.where(agreement_scores < dynamic_threshold)[0]
+        
+        # Safety: ensure at least one kept
+        if len(kept_indices) == 0:
+            best_idx = np.argmax(agreement_scores)
+            kept_indices = np.array([best_idx])
+            filtered_indices = np.setdiff1d(np.arange(num_transcriptions), kept_indices)
+        
+        filtered_transcriptions = [transcriptions[i] for i in kept_indices]
+        
+        metadata = {
+            "status": "Success",
+            "agreement_scores": agreement_scores.tolist(),
+            "significant_gaps": significant_gaps.tolist(),
+            "dynamic_threshold": float(dynamic_threshold),
+            # "largest_gap": float(gaps[largest_gap_idx]),
+            "kept_indices": kept_indices.tolist(),
+            "filtered_indices": filtered_indices.tolist(),
+            "num_kept": len(kept_indices),
+            "num_filtered": len(filtered_indices)
+        }
+        
+        return filtered_transcriptions, metadata
+        
 class HybridEnsemble:
     def __init__(self, use_llm, mode="conservative", perfection_rule_length=5, dynamic_match_percentage=0.8):
         self.use_llm = use_llm
@@ -78,159 +199,6 @@ class HybridEnsemble:
 
         self._input_to_fusion = combined
 
-    def filter_transcriptions(self, transcriptions):
-        def _calculate_similarity_matrix(transcriptions: List[str]) -> pd.DataFrame:
-            """
-            Creates an N*N pairwise similarity matrix for all transcriptions.
-            
-            Args:
-                transcriptions (List[str]): ['transcription_text_1', 'transcription_text_2', ...]
-                
-            Returns:
-                pd.DataFrame: An N*N matrix where cell (i, j) is the Levenshtein
-                            ratio (0-100) between transcription i and transcription j.
-            """
-            def word_sequence_ratio(words1: List[str], words2: List[str]) -> float:
-                """
-                Calculates the similarity ratio (0-100) based on matching *words*.
-                """
-                if not words1 and not words2: return 100.0
-                if not words1 or not words2: return 0.0
-                matcher = difflib.SequenceMatcher(None, words1, words2)
-                return matcher.ratio() * 100.0
-            
-            num_systems = len(transcriptions)
-            tokenized_trans = [t.split() for t in transcriptions]
-            df_similarity = pd.DataFrame(index=range(num_systems), columns=range(num_systems), dtype=float)
-            for i in range(num_systems):
-                for j in range(i, num_systems):
-                    if i == j:
-                        similarity = 100.0
-                    else:
-                        words_i = tokenized_trans[i]
-                        words_j = tokenized_trans[j]
-                        similarity = word_sequence_ratio(words_i, words_j)
-                    
-                    df_similarity.loc[i, j] = similarity
-                    df_similarity.loc[j, i] = similarity
-            return df_similarity
-        
-        def elbow_method_threshold(merge_distances):
-            """
-            Apply the Kneedle algorithm to find the most appropriate cut-off for clustering.
-            
-            Args:
-                merge_distances (np.ndarray): Array of merge distances from the linkage matrix.
-            
-            Returns:
-                float or None: Threshold for clustering, or None if no elbow is found.
-            """
-            # kneed requires at least 2 points to find an elbow.
-            if len(merge_distances) < 2:
-                return None
-
-            # Apply Kneedle to find the elbow in the merge distances
-            kneedle = KneeLocator(
-                range(len(merge_distances)),
-                merge_distances,
-                curve="convex",
-                direction="increasing",
-            )
-            
-            # kneedle.elbow is None if no elbow is found
-            if kneedle.elbow is None:
-                return None
-
-            # --- FIX ---
-            # Ensure the index is a scalar int, not an array or list
-            elbow_index = kneedle.elbow
-            if hasattr(elbow_index, '__len__'):  # Check if it's array-like
-                elbow_index = elbow_index[0]  # Extract first element
-            
-            elbow_index = int(elbow_index)  # Cast to plain int
-            # --- END FIX ---
-
-            # Indexing with a scalar int guarantees a scalar float
-            elbow_value = merge_distances[elbow_index]
-            
-            return elbow_value
-        
-        def differentiator_threshold(merge_distances):
-            jumps = np.diff(merge_distances)
-            # Find the index of the largest jump
-            # (We add 1 because np.diff returns an array 1 shorter)
-            if len(jumps) == 0:
-                # Only one merge, cannot find a jump, return original
-                return None
-
-            jump_index = np.argmax(jumps)
-            last_good_distance = merge_distances[jump_index]
-            first_bad_distance = merge_distances[jump_index + 1]
-            dynamic_t = (last_good_distance + first_bad_distance) / 2
-            return dynamic_t
-                
-        num_transcriptions = len(transcriptions)
-        if num_transcriptions <= 2:
-            metadata = {
-                "status": "Skipped",
-                "reason": "Not enough items to cluster (<= 2)",
-                "kept_indices": list(range(num_transcriptions)),
-                "filtered_indices": []
-            }
-            return transcriptions, metadata
-        
-        similarity_df = _calculate_similarity_matrix(transcriptions)
-        distance_matrix = 100 - similarity_df.values
-        distance_condensed = squareform(distance_matrix, checks=True)
-        if np.all(distance_condensed == 0):
-            metadata = {
-                "status": "Skipped",
-                "reason": "All items are identical",
-                "kept_indices": list(range(num_transcriptions)),
-                "filtered_indices": []
-            }
-            return transcriptions, metadata
-        
-        if np.all(distance_condensed == 100):
-            metadata = {
-                "status": "Skipped",
-                "reason": "All items are different",
-                "kept_indices": list(range(num_transcriptions)),
-                "filtered_indices": []
-            }
-            return transcriptions, metadata
-
-        Z = linkage(distance_condensed, method='single')
-        dynamic_t = elbow_method_threshold(Z[:, 2])
-        if dynamic_t is None:
-            metadata = {
-                "status": "Skipped",
-                "reason": "Only one merge, cannot find a jump",
-                "kept_indices": list(range(num_transcriptions)),
-                "filtered_indices": []
-            }
-            return transcriptions, metadata
-        
-        labels = fcluster(Z, t=dynamic_t, criterion='distance')
-        unique_labels, counts = np.unique(labels, return_counts=True)
-        largest_cluster_label = unique_labels[np.argmax(counts)]
-        kept_indices = np.where(labels == largest_cluster_label)[0]
-        filtered_indices = np.where(labels != largest_cluster_label)[0]
-        filtered_transcriptions = [transcriptions[i] for i in kept_indices]
-        cluster_sizes = {label: (labels == label).sum() for label in unique_labels}
-        filtration_metadata = {
-            "status": "Success",
-            "merge_distances": Z[:, 2],
-            "dynamic_threshold_t": dynamic_t,
-            "cluster_labels": labels,
-            "consensus_cluster_label": largest_cluster_label,
-            "kept_indices": kept_indices,
-            "filtered_indices": filtered_indices,
-            "num_clusters": len(unique_labels),
-            "cluster_sizes": cluster_sizes
-        }
-        return filtered_transcriptions, filtration_metadata
-                
     def get_reference_from_transcriptions(self, transcriptions):
         def get_longest_reference(transcriptions):
             def validate_anchor_quality(reference, transcription):
@@ -971,7 +939,7 @@ class HybridEnsemble:
         def fuse_sample_transcriptions(audio_path, transcriptions):
             transcriptions_copy = list(transcriptions)
             fusion_start = time.time()
-            filtered_transcriptions, filtration_metadata = self.filter_transcriptions(transcriptions_copy)
+            filtered_transcriptions, filtration_metadata = TranscriptFilter().main(transcriptions_copy)
             reference_type, reference, reference_metadata = self.get_reference_from_transcriptions(filtered_transcriptions)
             alignment_results, alignment_metadata = self.align_transcriptions_to_reference(reference=reference, reference_type=reference_type, 
                                                                                            reference_index=reference_metadata["reference_index"], 
@@ -1010,7 +978,7 @@ class HybridEnsemble:
         if not self._input_to_fusion:
             raise ValueError("Run EnsembleInference.combine_models_transcriptions first.")
 
-        with ThreadPoolExecutor(max_workers = os.cpu_count()) as executor:
+        with ThreadPoolExecutor(max_workers = 8) as executor:
             futures = {executor.submit(process_item, item): item for item in self.input_to_fusion.items()}
             samples_info = {}
             for future in tqdm(as_completed(futures), total=len(futures), desc="Fusing Inputs..."):

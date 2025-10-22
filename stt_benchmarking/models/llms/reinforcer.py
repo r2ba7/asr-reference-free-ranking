@@ -274,12 +274,12 @@ class FusionReinforcer:
         api_key=os.getenv("OPENROUTER_API_KEY"),
     )
     # CONFIGURATION: Set a threshold for how much the LLM is allowed to change the sentence.
-    # A value of 0.3 means a change of more than 30% will be rejected.
-    MAX_NORMALIZED_EDIT_DISTANCE = 0.3
+    # A value of 0.3 means a change of more than 33% will be rejected.
+    MAX_NORMALIZED_EDIT_DISTANCE = 0.33
     MAX_RETRIES = 3
 
     def __init__(self):
-        print(51)
+        print(52)
 
     # No changes needed for _chunk_needed, _format_sentence_table, _prepare_chunked_operations
     # These methods correctly handle data preparation.

@@ -61,9 +61,9 @@ class FastConformerInference:
             try:
                 # Time inference
                 start_time = time.time()
-                with torch.no_grad():
-                    output = self.model.transcribe([audio_path], verbose=False, batch_size=64)
-                raw_prediction = output[0].text
+                output = self.model.transcribe([audio_path], verbose=False, return_hypotheses=True, batch_size=64,)
+                hypothesis = output[0]
+                raw_prediction = hypothesis.text
                 inference_time = time.time() - start_time
                 if self._processed_count > 4:
                     self._total_inference_time += inference_time

@@ -978,7 +978,6 @@ class VotingReinforcer:
         llm_metadata["llm_time"] = llm_time
         return llm_transcript, llm_metadata    
 
-
 class HybridEnsemble:
     def __init__(self):
         self._input_to_fusion = {}
@@ -986,7 +985,6 @@ class HybridEnsemble:
         self._processed_results = []
         self._overall_metrics = None
 
-        
     def combine_models_transcriptions(self, *samples_dicts, missing_value=""):
         """
         Align multiple samples_info dicts into an audio-centric structure.

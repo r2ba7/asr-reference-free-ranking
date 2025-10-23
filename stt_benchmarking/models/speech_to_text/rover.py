@@ -9,10 +9,10 @@ import pandas as pd
 from Levenshtein import distance
 import numpy as np
 from tqdm import tqdm
+from editdistance import eval as edit_distance
 
 from stt_benchmarking.utils import text_processing, helpers, metrics
 from . import LOGGER
-
 
 
 class TranscriptFilter:
@@ -125,320 +125,227 @@ class TranscriptFilter:
         
         return filtered_transcriptions, metadata
 
-class ROVEREnsemble:
+class ROVER:
     """
-    ROVER (Recognizer Output Voting Error Reduction) implementation.
-    
-    Classic ROVER algorithm:
-    1. Align all hypotheses using word-level alignment (no timing info needed)
-    2. Create Word Transition Network (WTN) with aligned positions
-    3. Majority voting at each position with frequency-based selection
-    4. Character-level edit distance for tie-breaking
+    ROVER (Recognizer Output Voting Error Reduction) with optional greedy progressive fusion.
+
+    Two modes:
+      - Standard (greedy=False): build global WTN across all systems (full multi-sequence alignment)
+      - Greedy (greedy=True): progressively fuse systems one by one (faster, local greedy alignment)
     """
-    
-    def __init__(self, model_weights=None):
+
+    def __init__(self, model_weights=None, greedy=False):
         """
         Args:
-            model_weights (list): Optional pre-computed weights for each model
-                                 If None, uses equal weights (standard ROVER)
+            model_weights (list | None): Precomputed weights for each model. If None -> equal weights.
+            greedy (bool): If True, performs progressive greedy fusion instead of full WTN.
         """
         self.model_weights = model_weights
+        self.greedy = greedy
         self._input_to_fusion = {}
         self._fusion_results = []
         self._overall_metrics = None
-    
+
+    # -------------------------------------------------------------------------
+    # Core combination
+    # -------------------------------------------------------------------------
     def combine_models_transcriptions(self, *samples_dicts, missing_value=""):
         """
-        Align multiple samples_info dicts into an audio-centric structure.
-        
-        Args:
-            *samples_dicts: Each is a dict like {audio_path: {normalized_prediction: str}}
-            missing_value (str): Placeholder when a dict has no prediction for a sample.
-        
-        Returns:
-            dict: {audio_path: [transcript_from_model1, transcript_from_model2, ...]}
+        Merge predictions from multiple models by audio_id.
+        Returns dict: {audio_path: [t1, t2, ...]}
         """
         if not samples_dicts:
             return {}
-        
-        all_audio_paths = sorted({path for d in samples_dicts for path in d.keys()})
+        all_audio_paths = sorted({p for d in samples_dicts for p in d})
         combined = {}
-        for audio_path in all_audio_paths:
-            combined[audio_path] = []
-            for d in samples_dicts:
-                if audio_path in d:
-                    transcript = d[audio_path].get("normalized_prediction", missing_value)
-                else:
-                    transcript = missing_value
-                combined[audio_path].append(transcript)
-        
+        for path in all_audio_paths:
+            combined[path] = [
+                (d[path]["normalized_prediction"] if path in d else missing_value)
+                for d in samples_dicts
+            ]
         self._input_to_fusion = combined
-    
+        return combined
+
+    # -------------------------------------------------------------------------
+    # Word Transition Network (WTN)
+    # -------------------------------------------------------------------------
     def build_word_transition_network(self, transcriptions):
         """
-        Build Word Transition Network (WTN) using multi-sequence alignment.
-        
-        "Time slot" in ROVER = aligned word position (not actual time):
-        - Align word sequences to find corresponding positions
-        - Each column in alignment matrix = one "time slot" (word position)
-        - Use SequenceMatcher to find matching/mismatching word positions
-        
-        Args:
-            transcriptions (list): List of transcription strings
-            
-        Returns:
-            dict: WTN structure with aligned tokens and metadata
+        Multi-sequence alignment producing a Word Transition Network (WTN).
+        Greedy or full alignment depending on self.greedy.
         """
         def pairwise_align(words1, words2):
-            """
-            Align two word sequences.
-            Returns two lists of same length with None for gaps.
-            """
             if not words1 and not words2:
                 return [], []
             if not words1:
                 return [None] * len(words2), words2
             if not words2:
                 return words1, [None] * len(words1)
-            
+
             matcher = SequenceMatcher(None, words1, words2)
-            aligned1, aligned2 = [], []
-            
+            a1, a2 = [], []
             for op, i1, i2, j1, j2 in matcher.get_opcodes():
                 if op == 'equal':
-                    # Words match - add them aligned
-                    for idx in range(i2 - i1):
-                        aligned1.append(words1[i1 + idx])
-                        aligned2.append(words2[j1 + idx])
-                        
+                    for k in range(i2 - i1):
+                        a1.append(words1[i1 + k])
+                        a2.append(words2[j1 + k])
                 elif op == 'replace':
-                    # Words differ at same position
-                    max_len = max(i2 - i1, j2 - j1)
-                    for idx in range(max_len):
-                        w1 = words1[i1 + idx] if i1 + idx < i2 else None
-                        w2 = words2[j1 + idx] if j1 + idx < j2 else None
-                        aligned1.append(w1)
-                        aligned2.append(w2)
-                        
+                    m = max(i2 - i1, j2 - j1)
+                    for k in range(m):
+                        w1 = words1[i1 + k] if i1 + k < i2 else None
+                        w2 = words2[j1 + k] if j1 + k < j2 else None
+                        a1.append(w1)
+                        a2.append(w2)
                 elif op == 'delete':
-                    # Words only in sequence 1
-                    for idx in range(i2 - i1):
-                        aligned1.append(words1[i1 + idx])
-                        aligned2.append(None)
-                        
+                    for k in range(i2 - i1):
+                        a1.append(words1[i1 + k])
+                        a2.append(None)
                 elif op == 'insert':
-                    # Words only in sequence 2
-                    for idx in range(j2 - j1):
-                        aligned1.append(None)
-                        aligned2.append(words2[j1 + idx])
-            
-            return aligned1, aligned2
-        
-        def merge_into_alignment(alignment_matrix, new_words, num_existing_models):
-            """
-            Merge new word sequence into existing alignment matrix.
-            
-            alignment_matrix: list of slots, each slot = list of words (one per model)
-            new_words: list of words from new model
-            """
-            if not alignment_matrix:
-                # First sequence - create matrix
-                return [[word] for word in new_words]
-            
-            # Extract consensus from current alignment
-            consensus_words = []
-            for slot in alignment_matrix:
-                # Pick first non-None word as representative
-                non_null = [w for w in slot if w is not None]
-                consensus_words.append(non_null[0] if non_null else None)
-            
-            # Remove Nones for alignment
-            consensus_compact = [w for w in consensus_words if w is not None]
-            
-            # Align new sequence to consensus
-            aligned_consensus, aligned_new = pairwise_align(consensus_compact, new_words)
-            
-            # Build new alignment matrix
-            new_matrix = []
-            consensus_idx = 0
-            
-            for cons_word, new_word in zip(aligned_consensus, aligned_new):
-                if cons_word is not None:
-                    # Extend existing slot
-                    new_matrix.append(alignment_matrix[consensus_idx] + [new_word])
-                    consensus_idx += 1
-                else:
-                    # Create new slot for insertion
-                    # Pad with None for all existing models
-                    new_matrix.append([None] * num_existing_models + [new_word])
-            
-            return new_matrix
-        
-        # Filter valid transcriptions
-        valid_transcriptions = [(i, t) for i, t in enumerate(transcriptions) 
-                               if t and t.strip()]
-        
-        if not valid_transcriptions:
-            return {
-                "alignment_matrix": [],
-                "num_slots": 0,
-                "num_models": 0,
-                "model_indices": []
-            }
-        
-        if len(valid_transcriptions) == 1:
-            idx, trans = valid_transcriptions[0]
-            words = trans.split()
-            return {
-                "alignment_matrix": [[w] for w in words],
-                "num_slots": len(words),
-                "num_models": 1,
-                "model_indices": [idx]
-            }
-        
-        # Progressive alignment: align sequences one by one
-        alignment_matrix = None
-        model_indices = []
-        
-        for idx, trans in valid_transcriptions:
-            words = trans.split()
-            num_existing = len(model_indices)
-            alignment_matrix = merge_into_alignment(alignment_matrix, words, num_existing)
-            model_indices.append(idx)
-        
+                    for k in range(j2 - j1):
+                        a1.append(None)
+                        a2.append(words2[j1 + k])
+            return a1, a2
+
+        valid = [(i, t.strip()) for i, t in enumerate(transcriptions) if t and t.strip()]
+        if not valid:
+            return {"alignment_matrix": [], "num_slots": 0, "num_models": 0, "model_indices": []}
+        if len(valid) == 1:
+            idx, t = valid[0]
+            words = t.split()
+            return {"alignment_matrix": [[w] for w in words], "num_slots": len(words),
+                    "num_models": 1, "model_indices": [idx]}
+
+        # Progressive greedy alignment (faster, approximate)
+        if self.greedy:
+            idx0, first = valid[0]
+            matrix = [[w] for w in first.split()]
+            indices = [idx0]
+
+            for idx, text in valid[1:]:
+                new_words = text.split()
+                consensus = [next((w for w in slot if w is not None), None) for slot in matrix]
+                consensus_compact = [w for w in consensus if w is not None]
+                a1, a2 = pairwise_align(consensus_compact, new_words)
+
+                new_matrix = []
+                cons_i = 0
+                for cword, nword in zip(a1, a2):
+                    if cword is not None:
+                        new_matrix.append(matrix[cons_i] + [nword])
+                        cons_i += 1
+                    else:
+                        new_matrix.append([None] * len(indices) + [nword])
+                matrix = new_matrix
+                indices.append(idx)
+        else:
+            # Full multi-sequence alignment (accurate but O(n^2))
+            matrix = None
+            indices = []
+            for idx, text in valid:
+                words = text.split()
+                num_existing = len(indices)
+                matrix = self._merge_into_alignment(matrix, words, num_existing, pairwise_align)
+                indices.append(idx)
+
         return {
-            "alignment_matrix": alignment_matrix,
-            "num_slots": len(alignment_matrix) if alignment_matrix else 0,
-            "num_models": len(valid_transcriptions),
-            "model_indices": model_indices
+            "alignment_matrix": matrix,
+            "num_slots": len(matrix) if matrix else 0,
+            "num_models": len(valid),
+            "model_indices": indices
         }
-    
+
+    @staticmethod
+    def _merge_into_alignment(matrix, new_words, num_existing, pairwise_align_fn):
+        if not matrix:
+            return [[w] for w in new_words]
+        consensus = [next((w for w in slot if w is not None), None) for slot in matrix]
+        compact = [w for w in consensus if w is not None]
+        a1, a2 = pairwise_align_fn(compact, new_words)
+        new_matrix = []
+        ci = 0
+        for cw, nw in zip(a1, a2):
+            if cw is not None:
+                new_matrix.append(matrix[ci] + [nw])
+                ci += 1
+            else:
+                new_matrix.append([None] * num_existing + [nw])
+        return new_matrix
+
+    # -------------------------------------------------------------------------
+    # Voting
+    # -------------------------------------------------------------------------
     def vote_on_wtn(self, wtn, weights=None):
         """
-        Standard ROVER voting: majority vote + edit distance tie-breaking.
-        
-        For each slot (word position):
-        1. Count occurrences of each word (weighted if weights provided)
-        2. Select most frequent word
-        3. If tie: use character-level edit distance to pick most "central" word
-        
-        Edit distance tie-breaking:
-        - For tied words, compute sum of edit distances to ALL other candidates
-        - Pick word with minimum total distance (most similar to others)
-        
-        Args:
-            wtn (dict): Word Transition Network structure
-            weights (list): Optional weights for voting (None = equal weights)
-            
-        Returns:
-            dict: Voting results
+        Majority vote + edit-distance tie-break.
         """
         def vote_slot(slot, slot_weights):
-            """
-            Vote on single slot using frequency + edit distance.
-            """
-            # Extract non-null candidates with their model indices
-            candidates = [(i, word) for i, word in enumerate(slot) if word is not None]
-            
-            if not candidates:
+            cands = [(i, w) for i, w in enumerate(slot) if w is not None]
+            if not cands:
                 return None, {}, 0.0
-            
-            if len(candidates) == 1:
-                word = candidates[0][1]
-                return word, {word: 1.0}, 1.0
-            
-            # Weighted voting (count occurrences weighted by model confidence)
-            vote_counts = defaultdict(float)
-            for model_idx, word in candidates:
-                vote_counts[word] += slot_weights[model_idx]
-            
-            # Find max vote
-            max_votes = max(vote_counts.values())
-            tied_words = [word for word, votes in vote_counts.items() 
-                         if votes == max_votes]
-            
-            # Tie-breaking with edit distance
-            if len(tied_words) > 1:
-                # Compute total edit distance to all other candidates
-                all_candidate_words = [word for _, word in candidates]
-                
-                distance_scores = {}
-                for tied_word in tied_words:
-                    total_distance = sum(
-                        distance(tied_word, other) 
-                        for other in all_candidate_words 
-                        if other != tied_word
-                    )
-                    distance_scores[tied_word] = total_distance
-                
-                # Pick word with minimum total distance (most central)
-                min_distance = min(distance_scores.values())
-                best_words = [w for w, d in distance_scores.items() 
-                            if d == min_distance]
-                
-                # Final tie-break: shortest word, then lexicographic
-                chosen = min(best_words, key=lambda w: (len(w), w))
+            if len(cands) == 1:
+                w = cands[0][1]
+                return w, {w: 1.0}, 1.0
+
+            votes = defaultdict(float)
+            for i, w in cands:
+                votes[w] += slot_weights[i]
+            max_vote = max(votes.values())
+            tied = [w for w, v in votes.items() if v == max_vote]
+            if len(tied) > 1:
+                allw = [w for _, w in cands]
+                scores = {tw: sum(edit_distance(tw, ow) for ow in allw if ow != tw) for tw in tied}
+                mind = min(scores.values())
+                best = [w for w, d in scores.items() if d == mind]
+                chosen = min(best, key=lambda w: (len(w), w))
             else:
-                chosen = tied_words[0]
-            
-            # Confidence = vote proportion
-            total_votes = sum(vote_counts.values())
-            confidence = vote_counts[chosen] / total_votes if total_votes > 0 else 0.0
-            
-            return chosen, dict(vote_counts), confidence
-        
-        alignment_matrix = wtn["alignment_matrix"]
+                chosen = tied[0]
+            total = sum(votes.values())
+            conf = votes[chosen] / total if total > 0 else 0.0
+            return chosen, dict(votes), conf
+
+        matrix = wtn["alignment_matrix"]
+        if not matrix:
+            return {"fusion_transcript": "", "fusion_tokens": [], "voting_details": [],
+                    "confidence_score": 0.0}
+
         num_models = wtn["num_models"]
         model_indices = wtn["model_indices"]
-        
-        # Setup voting weights
+
         if weights is None:
-            # Standard ROVER: equal weights
             slot_weights = [1.0] * num_models
         else:
-            # Use provided model weights (e.g., based on WER)
             slot_weights = [weights[i] for i in model_indices]
-            # Normalize
-            total = sum(slot_weights)
-            slot_weights = [w / total for w in slot_weights]
-        
-        # Vote on each slot (word position)
-        fusion_tokens = []
-        voting_details = []
-        
-        for slot_idx, slot in enumerate(alignment_matrix):
-            chosen_word, vote_distribution, confidence = vote_slot(slot, slot_weights)
-            
-            fusion_tokens.append(chosen_word)
-            voting_details.append({
-                "slot": slot_idx,
-                "chosen_word": chosen_word,
-                "vote_distribution": vote_distribution,
-                "confidence": confidence,
-                "all_candidates": [w for w in slot if w is not None]
+            s = sum(slot_weights)
+            slot_weights = [w / s for w in slot_weights] if s else [1.0] * num_models
+
+        fusion_tokens, details = [], []
+        for slot_i, slot in enumerate(matrix):
+            word, dist, conf = vote_slot(slot, slot_weights)
+            fusion_tokens.append(word)
+            details.append({
+                "slot": slot_i,
+                "chosen_word": word,
+                "vote_distribution": dist,
+                "confidence": conf,
+                "candidates": [w for w in slot if w is not None]
             })
-        
-        # Build final transcript
-        fusion_transcript = " ".join([w for w in fusion_tokens if w is not None])
-        
-        # Overall confidence
-        avg_confidence = (np.mean([d["confidence"] for d in voting_details]) 
-                         if voting_details else 0.0)
-        
+
+        transcript = " ".join([w for w in fusion_tokens if w is not None])
+        avg_conf = float(np.mean([d["confidence"] for d in details])) if details else 0.0
         return {
-            "fusion_transcript": fusion_transcript,
+            "fusion_transcript": transcript,
             "fusion_tokens": fusion_tokens,
-            "voting_details": voting_details,
-            "confidence_score": avg_confidence,
+            "voting_details": details,
+            "confidence_score": avg_conf,
             "num_slots": len(fusion_tokens),
             "metadata": {
-                "algorithm": "ROVER",
+                "algorithm": "ROVER-greedy" if self.greedy else "ROVER",
                 "num_models": num_models,
                 "weighted": weights is not None
             }
         }
     
-    def fusion(self, filteration_mode="mean"):
+    def main(self, filteration_mode="mean", model_weights=None):
         """
         Main ROVER fusion pipeline.
         """
@@ -446,20 +353,15 @@ class ROVEREnsemble:
             transcriptions_copy = list(transcriptions)
             fusion_start = time.time()
             filtered_transcriptions, filtration_metadata = TranscriptFilter(mode=filteration_mode).main(transcriptions_copy)
-            # Step 1: Build Word Transition Network
             wtn = self.build_word_transition_network(filtered_transcriptions)
-            
-            # Step 2: Vote on WTN
-            result = self.vote_on_wtn(wtn, self.model_weights)
+            result = self.vote_on_wtn(wtn, model_weights)
             result["fusion_time"] = time.time() - fusion_start
-            
-            # Add alignment info for inspection
             result["wtn"] = {
                 "num_slots": wtn["num_slots"],
                 "num_models": wtn["num_models"],
-                "model_indices": wtn["model_indices"]
+                "model_indices": wtn["model_indices"],
             }
-            
+                
             return {audio_path: result}
         
         def process_item(item):

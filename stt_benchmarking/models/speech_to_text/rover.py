@@ -1,14 +1,129 @@
 from difflib import SequenceMatcher
 from collections import defaultdict, Counter
 import time
-import hashlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import difflib
+from typing import Dict, Any, List, Tuple
+
+import pandas as pd
+from Levenshtein import distance
 import numpy as np
 from tqdm import tqdm
-from Levenshtein import distance
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from stt_benchmarking.utils import text_processing, helpers, metrics
 from . import LOGGER
+
+
+
+class TranscriptFilter:
+    def __init__(self, mode="mean"):
+        self.mode = mode
+        self.__verify_mode()
+    
+    def __verify_mode(self):
+        if self.mode not in ["mean", "iqr"]:
+            raise ValueError("mode should be either mean or iqr.")
+        
+    def _calculate_similarity_matrix(self, transcriptions: List[str]) -> pd.DataFrame:
+        """Creates an N*N pairwise similarity matrix for all transcriptions."""
+        def _word_sequence_ratio(words1: List[str], words2: List[str]) -> float:
+            """Calculates the similarity ratio (0-100) based on matching *words*."""
+            if not words1 and not words2: return 100.0
+            if not words1 or not words2: return 0.0
+            matcher = difflib.SequenceMatcher(None, words1, words2)
+            return matcher.ratio() * 100.0
+        
+        num_systems = len(transcriptions)
+        tokenized_trans = [t.split() for t in transcriptions]
+        df_similarity = pd.DataFrame(index=range(num_systems), columns=range(num_systems), dtype=float)
+        for i in range(num_systems):
+            for j in range(i, num_systems):
+                if i == j:
+                    similarity = 100.0
+                else:
+                    similarity = _word_sequence_ratio(tokenized_trans[i], tokenized_trans[j])
+                
+                df_similarity.loc[i, j] = similarity
+                df_similarity.loc[j, i] = similarity
+        return df_similarity
+    
+    def main(self, transcriptions: List[str]) -> Tuple[List[str], Dict[str, Any]]:
+        """
+        Filters transcripts by pairwise agreement with dynamic threshold detection.
+        
+        Finds natural gap in agreement scores to separate high-agreement from low-agreement.
+        """
+        num_transcriptions = len(transcriptions)
+        
+        if num_transcriptions < 3:
+            return transcriptions, {
+                "status": "Skipped", 
+                "reason": "Need ≥3 transcripts",
+                "kept_indices": list(range(num_transcriptions)), 
+                "filtered_indices": []
+            }
+        
+        # Build similarity matrix
+        similarity_matrix = self._calculate_similarity_matrix(transcriptions).values
+        agreement_scores = []
+        for i in range(num_transcriptions):
+            others_similarity = np.concatenate([similarity_matrix[i, :i], similarity_matrix[i, i+1:]])
+            agreement_scores.append(np.mean(others_similarity))
+        
+        agreement_scores = np.array(agreement_scores)
+        # Check for uniform scores
+        if len(np.unique(agreement_scores)) == 1:
+            return transcriptions, {
+                "status": "Skipped",
+                "reason": "All transcripts have identical agreement",
+                "kept_indices": list(range(num_transcriptions)),
+                "filtered_indices": []
+            }
+        
+        # Sort scores to find gaps
+        sorted_indices = np.argsort(agreement_scores)
+        sorted_scores = agreement_scores[sorted_indices]
+        gaps = np.diff(sorted_scores)
+        if self.mode == "mean":
+            significant_gaps = np.where(gaps > np.mean(gaps) + np.std(gaps))[0]
+        else:
+            q1, q3 = np.percentile(gaps, [25, 75])
+            iqr = q3 - q1
+            upper_fence = q3 + (1.5 * iqr)
+            significant_gaps = np.where(gaps > upper_fence)[0]
+
+        if len(significant_gaps) == 0:
+            return transcriptions, {
+                "status": "Skipped",
+                "reason": "Cannot compute gaps",
+                "kept_indices": list(range(num_transcriptions)),
+                "filtered_indices": []
+            }
+        
+        first_gap_idx = significant_gaps[0]
+        dynamic_threshold = sorted_scores[first_gap_idx + 1]
+        kept_indices = np.where(agreement_scores >= dynamic_threshold)[0]
+        filtered_indices = np.where(agreement_scores < dynamic_threshold)[0]
+        if len(kept_indices) == 0:
+            best_idx = np.argmax(agreement_scores)
+            kept_indices = np.array([best_idx])
+            filtered_indices = np.setdiff1d(np.arange(num_transcriptions), kept_indices)
+        
+        filtered_transcriptions = [transcriptions[i] for i in kept_indices]
+        metadata = {
+            "status": "Success",
+            "agreement_scores": agreement_scores.tolist(),
+            "significant_gaps": significant_gaps.tolist(),
+            "dynamic_threshold": float(dynamic_threshold),
+            # "largest_gap": float(gaps[largest_gap_idx]),
+            "kept_indices": kept_indices.tolist(),
+            "filtered_indices": filtered_indices.tolist(),
+            "num_models": len(transcriptions),
+            "num_kept": len(kept_indices),
+            "num_filtered": len(filtered_indices)
+        }
+        
+        return filtered_transcriptions, metadata
 
 class ROVEREnsemble:
     """
@@ -323,15 +438,16 @@ class ROVEREnsemble:
             }
         }
     
-    def fusion(self, **kwargs):
+    def fusion(self, filteration_mode="mean"):
         """
         Main ROVER fusion pipeline.
         """
         def fuse_sample(audio_path, transcriptions):
+            transcriptions_copy = list(transcriptions)
             fusion_start = time.time()
-            
+            filtered_transcriptions, filtration_metadata = TranscriptFilter(mode=filteration_mode).main(transcriptions_copy)
             # Step 1: Build Word Transition Network
-            wtn = self.build_word_transition_network(transcriptions)
+            wtn = self.build_word_transition_network(filtered_transcriptions)
             
             # Step 2: Vote on WTN
             result = self.vote_on_wtn(wtn, self.model_weights)

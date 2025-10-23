@@ -22,30 +22,23 @@ from stt_benchmarking.models.llms import reinforcer
 from . import LOGGER
 
 class TranscriptFilter:
-    """
-    Implements a two-stage hybrid filter for transcripts.
+    def __init__(self, mode="mean"):
+        self.mode = mode
+        self.__verify_mode()
     
-    - Stage 1: Perplexity filter to remove linguistic noise.
-    - Stage 2: Clustering filter to find consensus and remove outliers.
-    """
-    
-    def _differentiator_threshold(self, merge_distances):
-        jumps = np.diff(merge_distances)
-        if len(jumps) == 0: return None
-        jump_index = np.argmax(jumps)
-        last_good_distance = merge_distances[jump_index]
-        first_bad_distance = merge_distances[jump_index + 1]
-        return (last_good_distance + first_bad_distance) / 2
-    
-    def _word_sequence_ratio(self, words1: List[str], words2: List[str]) -> float:
-        """Calculates the similarity ratio (0-100) based on matching *words*."""
-        if not words1 and not words2: return 100.0
-        if not words1 or not words2: return 0.0
-        matcher = difflib.SequenceMatcher(None, words1, words2)
-        return matcher.ratio() * 100.0
+    def __verify_mode(self):
+        if self.mode not in ["mean", "iqr"]:
+            raise ValueError("mode should be either mean or iqr.")
         
     def _calculate_similarity_matrix(self, transcriptions: List[str]) -> pd.DataFrame:
         """Creates an N*N pairwise similarity matrix for all transcriptions."""
+        def _word_sequence_ratio(words1: List[str], words2: List[str]) -> float:
+            """Calculates the similarity ratio (0-100) based on matching *words*."""
+            if not words1 and not words2: return 100.0
+            if not words1 or not words2: return 0.0
+            matcher = difflib.SequenceMatcher(None, words1, words2)
+            return matcher.ratio() * 100.0
+        
         num_systems = len(transcriptions)
         tokenized_trans = [t.split() for t in transcriptions]
         df_similarity = pd.DataFrame(index=range(num_systems), columns=range(num_systems), dtype=float)
@@ -54,7 +47,7 @@ class TranscriptFilter:
                 if i == j:
                     similarity = 100.0
                 else:
-                    similarity = self._word_sequence_ratio(tokenized_trans[i], tokenized_trans[j])
+                    similarity = _word_sequence_ratio(tokenized_trans[i], tokenized_trans[j])
                 
                 df_similarity.loc[i, j] = similarity
                 df_similarity.loc[j, i] = similarity
@@ -97,11 +90,14 @@ class TranscriptFilter:
         sorted_indices = np.argsort(agreement_scores)
         sorted_scores = agreement_scores[sorted_indices]
         gaps = np.diff(sorted_scores)
-        significant_gaps = np.where(gaps > np.mean(gaps) + np.std(gaps))[0]
-        # gap_median = np.median(gaps)
-        # gap_mad = np.median(np.abs(gaps - gap_median))
-        # significant_gaps = np.where(gaps > gap_median + 2 * gap_mad)[0]
-        # significant_gaps = np.where(gaps > np.median(gaps))[0]
+        if self.mode == "mean":
+            significant_gaps = np.where(gaps > np.mean(gaps) + np.std(gaps))[0]
+        else:
+            q1, q3 = np.percentile(gaps, [25, 75])
+            iqr = q3 - q1
+            upper_fence = q3 + (1.5 * iqr)
+            significant_gaps = np.where(gaps > upper_fence)[0]
+
         if len(significant_gaps) == 0:
             return transcriptions, {
                 "status": "Skipped",
@@ -110,22 +106,16 @@ class TranscriptFilter:
                 "filtered_indices": []
             }
         
-        
         first_gap_idx = significant_gaps[0]
         dynamic_threshold = sorted_scores[first_gap_idx + 1]
-
-        # Everything below threshold = noise, remove it
         kept_indices = np.where(agreement_scores >= dynamic_threshold)[0]
         filtered_indices = np.where(agreement_scores < dynamic_threshold)[0]
-        
-        # Safety: ensure at least one kept
         if len(kept_indices) == 0:
             best_idx = np.argmax(agreement_scores)
             kept_indices = np.array([best_idx])
             filtered_indices = np.setdiff1d(np.arange(num_transcriptions), kept_indices)
         
         filtered_transcriptions = [transcriptions[i] for i in kept_indices]
-        
         metadata = {
             "status": "Success",
             "agreement_scores": agreement_scores.tolist(),
@@ -134,74 +124,26 @@ class TranscriptFilter:
             # "largest_gap": float(gaps[largest_gap_idx]),
             "kept_indices": kept_indices.tolist(),
             "filtered_indices": filtered_indices.tolist(),
+            "num_models": len(transcriptions),
             "num_kept": len(kept_indices),
             "num_filtered": len(filtered_indices)
         }
         
         return filtered_transcriptions, metadata
+
+class ReferenceSelection:
+    def __init__(self, lengthmode="mean", matchmode="mean"):
+        self.lengthmode = lengthmode
+        self.matchmode = matchmode
+        self.__verify_mode()
+    
+    def __verify_mode(self):
+        if self.matchmode and self.lengthmode not in ["mean", "iqr"]:
+            raise ValueError("mode should be either mean or iqr.")
         
-class HybridEnsemble:
-    def __init__(self, use_llm, mode="conservative", perfection_rule_length=5, dynamic_match_percentage=0.8):
-        self.use_llm = use_llm
-        if self.use_llm:
-            self._initialize_llm()
-
-        self.perfection_rule_length = perfection_rule_length
-        self.dynamic_match_percentage = dynamic_match_percentage
-        self.priority_order = self._voting_priority(mode)
-        self._input_to_fusion = {}
-        self._samples_info = {}
-        self._processed_results = []
-        self._overall_metrics = None
-        LOGGER.info(f"Using the following parameters, perfection_rule_length: {self.perfection_rule_length}, dynamic_match_percentage: {self.dynamic_match_percentage}, priority_order: {self.priority_order}")
-
-    def _voting_priority(self, mode):
-        if mode.lower() == "conservative":
-            priority_order = ["<KEEP>", "<REPLACE>", "<DELETE>", "<SKIP>", "<INSERT>"]
-        elif mode.lower() == "aggressive":
-            priority_order = ["<REPLACE>", "<KEEP>", "<INSERT>", "<DELETE>", "<SKIP>"]
-        # reference
-        elif mode.lower() == "reference":
-            priority_order = ["<KEEP>", "<SKIP>", "<REPLACE>", "<INSERT>", "<DELETE>"]
-        else:
-            raise ValueError("mode should be one of the following: [conservative, aggressive, reference]")
-        return priority_order
-
-    def _initialize_llm(self):
-        self.REINFORCER = reinforcer.FusionReinforcer()
-        
-    def combine_models_transcriptions(self, *samples_dicts, missing_value=""):
-        """
-        Align multiple samples_info dicts into an audio-centric structure.
-
-        Args:
-            *samples_dicts: Each is a dict like {audio_path: {normalized_prediction: str}}
-            missing_value (str): Placeholder when a dict has no prediction for a sample.
-
-        Returns:
-            dict: {audio_path: [transcript_from_model1, transcript_from_model2, ...]}
-        """
-        if not samples_dicts:
-            return {}
-
-        # Collect all unique audio paths
-        all_audio_paths = sorted({path for d in samples_dicts for path in d.keys()})
-        # Build combined dict
-        combined = {}
-        for audio_path in all_audio_paths:
-            combined[audio_path] = []
-            for d in samples_dicts:
-                if audio_path in d:
-                    transcript = d[audio_path].get("normalized_prediction", missing_value)
-                else:
-                    transcript = missing_value
-                combined[audio_path].append(transcript)
-
-        self._input_to_fusion = combined
-
-    def get_reference_from_transcriptions(self, transcriptions):
+    def main(self, transcriptions):
         def get_longest_reference(transcriptions):
-            def validate_anchor_quality(reference, transcription):
+            def validate_anchor_quality(reference, transcription, length_stats, match_stats):
                 """
                 Validate that anchors represent meaningful common structure using SequenceMatcher
                 
@@ -226,41 +168,129 @@ class HybridEnsemble:
                 trans_words = transcription.split()
                 ref_remaining = ref_words[ref_pos:]
                 trans_remaining = trans_words[trans_pos:]
-                # Use SequenceMatcher on the remaining sequences for better validation
                 matcher = SequenceMatcher(None, ref_remaining, trans_remaining)
-                # Get the longest matching block starting from position 0 (right after anchor)
                 longest_match = matcher.find_longest_match(0, len(ref_remaining), 0, len(trans_remaining))
                 additional_matches = longest_match.size
                 shorter_sequence_length = min(len(ref_remaining), len(trans_remaining))
-                is_valid = False
                 min_required = 0
-                if shorter_sequence_length <= self.perfection_rule_length:
-                    # Check if the number of matching words is exactly equal to the length of the shorter sequence.
-                    min_required = shorter_sequence_length
-                    if additional_matches == shorter_sequence_length:
-                        is_valid = True
+                if shorter_sequence_length == 0: return False, None
+                if length_stats is None or match_stats is None:
+                    required_ratio = 0.75
+                    category = "unknown"
                 else:
-                    min_required = int(shorter_sequence_length * self.dynamic_match_percentage)
-                    # Check if we found at least our minimum required number of matches.
-                    if additional_matches >= min_required:
-                        is_valid = True
+                    lengthmode = length_stats['mode']
+                    matchmode = match_stats['mode']
+                    if lengthmode == "iqr":
+                        q1_len = length_stats['q1']
+                        q3_len = length_stats['q3']
+                        if shorter_sequence_length < q1_len:
+                            category = "short"
+                            required_ratio = match_stats['q3'] if matchmode == "iqr" else match_stats['upper']
+                        elif shorter_sequence_length > q3_len:
+                            category = "long"
+                            required_ratio = match_stats['q1'] if matchmode == "iqr" else match_stats['lower']
+                        else:
+                            category = "mid"
+                            required_ratio = match_stats['median'] if matchmode == "iqr" else match_stats['mean']
+                                        
+                    else:
+                        lower_len = length_stats['lower']
+                        upper_len = length_stats['upper']
+                        if shorter_sequence_length < lower_len:
+                            category = "short"
+                            required_ratio = match_stats['upper'] if matchmode == "mean" else match_stats['q3']
+                        elif shorter_sequence_length > upper_len:
+                            category = "long"
+                            required_ratio = match_stats['lower'] if matchmode == "mean" else match_stats['q1']
+                        else:
+                            category = "mid"
+                            required_ratio = match_stats['mean'] if matchmode == "mean" else match_stats['median']
 
+                min_required = int(np.ceil(shorter_sequence_length * required_ratio))
+                is_valid = additional_matches >= min_required
                 return is_valid, {
-                    "positions": anchors, 
+                    "positions": anchors,
                     "additional_matches": additional_matches,
-                    "min_required": min_required
+                    "min_required": min_required,
+                    "required_ratio": required_ratio,
+                    "shorter_sequence_length": shorter_sequence_length,
+                    "length_category": category
                 }
             
             valid_transcriptions = [(i, t) for i, t in enumerate(transcriptions) if t is not None]
             if not valid_transcriptions:
                 return False, None, None
             
+            all_lengths = [len(t.split()) for _, t in valid_transcriptions]
+            if len(all_lengths) < 2:
+                length_stats = None
+            else:
+                if self.lengthmode == "iqr":
+                    median_len = np.median(all_lengths)
+                    q1 = np.percentile(all_lengths, 25)
+                    q3 = np.percentile(all_lengths, 75)
+                    iqr = q3 - q1
+                    length_stats = {
+                        'mode': 'iqr',
+                        'median': median_len,
+                        'q1': q1,
+                        'q3': q3,
+                        'iqr': iqr,
+                        'min': min(all_lengths),
+                        'max': max(all_lengths)
+                    }
+                else:
+                    mean_len = np.mean(all_lengths)
+                    std_len = np.std(all_lengths)
+                    length_stats = {
+                        'mode': 'mean',
+                        'mean': mean_len,
+                        'std': std_len,
+                        'lower': mean_len - std_len,
+                        'upper': mean_len + std_len,
+                        'min': min(all_lengths),
+                        'max': max(all_lengths)
+                    }
+
+            observed_ratios = []
+            for i in range(len(valid_transcriptions)):
+                for j in range(i + 1, len(valid_transcriptions)):
+                    _, t1 = valid_transcriptions[i]
+                    _, t2 = valid_transcriptions[j]
+                    matcher = SequenceMatcher(None, t1.split(), t2.split())
+                    observed_ratios.append(matcher.ratio())
+            
+            if len(observed_ratios) == 0:
+                match_stats = None
+            else:
+                if self.matchmode == "iqr":
+                    match_stats = {
+                        'mode': 'iqr',
+                        'q1': np.percentile(observed_ratios, 25),
+                        'median': np.median(observed_ratios),
+                        'q3': np.percentile(observed_ratios, 75),
+                    }
+                else:
+                    match_stats = {
+                        'mode': 'mean',
+                        'mean': np.mean(observed_ratios),
+                        'std': np.std(observed_ratios),
+                        'lower': np.mean(observed_ratios) - np.std(observed_ratios),
+                        'upper': np.mean(observed_ratios) + np.std(observed_ratios),
+                    }
+
             longest_original_index, longest_reference = max(valid_transcriptions, key=lambda x: len(x[1]))
-            successful_alignments = 0
             total_comparisons = len(valid_transcriptions) - 1
+            anchor_metadata_list = []
+            successful_alignments = 0
             for original_index, transcription in valid_transcriptions:
                 if original_index != longest_original_index:
-                    is_valid, _ = validate_anchor_quality(longest_reference, transcription)
+                    is_valid, anchor_metadata = validate_anchor_quality(longest_reference, transcription, length_stats, match_stats)
+                    anchor_metadata_list.append({
+                        'transcription_index': original_index,
+                        'is_valid': is_valid,
+                        'details': anchor_metadata
+                    })
                     if is_valid:
                         successful_alignments += 1
             
@@ -271,8 +301,12 @@ class HybridEnsemble:
                 'score': success_ratio,
                 'successful_alignments': successful_alignments,
                 'total_comparisons': total_comparisons,
-                'reference_index': longest_original_index
+                'reference_index': longest_original_index,
+                'length_stats': length_stats,
+                'match_stats': match_stats,
+                'anchor_metadata': anchor_metadata_list
             }
+            
             return success, longest_reference, metadata
         
         def get_common_words_reference(transcriptions):
@@ -314,7 +348,6 @@ class HybridEnsemble:
                     'reference_index': best_index
                 }
                 return True, best_reference, metadata
-            
             return False, None, None
 
         def get_longest_reference_fallback(transcriptions):
@@ -376,9 +409,10 @@ class HybridEnsemble:
 
         fallback_success, fallback_reference, reference_metadata = get_longest_reference_fallback(transcriptions)
         if fallback_success: return "longest_fallback", fallback_reference, reference_metadata
-        else: return "failed", fallback_reference , reference_metadata
+        else: return "failed", fallback_reference , reference_metadata   
 
-    def align_transcriptions_to_reference(self, reference, reference_type, reference_index, transcriptions):
+class Alignment:
+    def main(self, reference, reference_type, reference_index, transcriptions):
         """
         Simple alignment function that extracts operations and candidate values.
         
@@ -724,55 +758,9 @@ class HybridEnsemble:
         elif reference_type == "failed":
             alignment_results, alignment_metadata = align_with_longest_fallback_strategy(reference=reference, transcriptions=transcriptions, reference_index=reference_index, reference_type=reference_type)
         return alignment_results, alignment_metadata
-    
-    def llm_reinforcer(self, fusion_tokens, candidates_tokens, max_tokens, chunk_size, overlap):
-        def postprocess_reinforced_output(response: reinforcer.GeneratedResponse) -> tuple:
-            chunks = response.reinforced_results or []
-            modifications = sum(1 for chunk in chunks if chunk.get("is_modified"))
-            transcript_pieces = []
-            for chunk in chunks:
-                if chunk.get("is_modified") and chunk.get("sentence"):
-                    transcript_pieces.append(chunk["sentence"])
-                else:
-                    original_sentence = chunk.get("metadata", {}).get("fusion_sentence", "")
-                    transcript_pieces.append(original_sentence)
 
-            unwanted_values = [None, "None", "Null", "null", ""]
-            filtered_pieces = [piece for piece in transcript_pieces if piece not in unwanted_values]
-            llm_transcript = " ".join(filtered_pieces).strip()
-            llm_metadata = {
-                "chunks": chunks,
-                "num_chunks": len(chunks),
-                "modifications": modifications,
-                "modification_ratio": modifications / len(chunks) if chunks else 0.0,
-                "is_chunked": response.is_chunked,
-            }
-            
-            return llm_transcript, llm_metadata
-
-        if not self.use_llm:
-            # Return an empty transcript and a default metadata object for consistency
-            llm_metadata = {
-                "llm_time": 0.0,
-                "status": "LLM reinforcement was disabled.",
-                "num_chunks": 0, "modifications": 0, "modification_ratio": 0.0
-            }
-            return "", llm_metadata
-        
-        llm_start = time.time()
-        response = self.REINFORCER.main(
-            fusion_tokens=fusion_tokens,
-            candidate_tokens=candidates_tokens,
-            max_tokens=max_tokens,
-            chunk_size=chunk_size,
-            overlap=overlap,
-        )
-        llm_time = time.time() - llm_start
-        llm_transcript, llm_metadata = postprocess_reinforced_output(response)
-        llm_metadata["llm_time"] = llm_time
-        return llm_transcript, llm_metadata    
-
-    def token_voting_scheme(self, alignment_results):
+class TokenLevelVoting:
+    def main(self, alignment_results):
         """
         Implement a token-only majority voting scheme.
         
@@ -935,23 +923,112 @@ class HybridEnsemble:
 
         return fusion_transcript, voting_metadata
 
-    def main(self, **kwargs):
+class VotingReinforcer:
+    def __init__(self, use_llm=False, max_tokens=25, chunk_size=25, overlap=3):
+        self.use_llm = use_llm
+        self.max_tokens = max_tokens
+        self.chunk_size = chunk_size
+        self.overlap = overlap
+        self.REINFORCER = reinforcer.FusionReinforcer()
+
+    def main(self, fusion_tokens, candidates_tokens):
+        def postprocess_reinforced_output(response: reinforcer.GeneratedResponse) -> tuple:
+            chunks = response.reinforced_results or []
+            modifications = sum(1 for chunk in chunks if chunk.get("is_modified"))
+            transcript_pieces = []
+            for chunk in chunks:
+                if chunk.get("is_modified") and chunk.get("sentence"):
+                    transcript_pieces.append(chunk["sentence"])
+                else:
+                    original_sentence = chunk.get("metadata", {}).get("fusion_sentence", "")
+                    transcript_pieces.append(original_sentence)
+
+            unwanted_values = [None, "None", "Null", "null", ""]
+            filtered_pieces = [piece for piece in transcript_pieces if piece not in unwanted_values]
+            llm_transcript = " ".join(filtered_pieces).strip()
+            llm_metadata = {
+                "chunks": chunks,
+                "num_chunks": len(chunks),
+                "modifications": modifications,
+                "modification_ratio": modifications / len(chunks) if chunks else 0.0,
+                "is_chunked": response.is_chunked,
+            }
+            
+            return llm_transcript, llm_metadata
+
+        if not self.use_llm:
+            # Return an empty transcript and a default metadata object for consistency
+            llm_metadata = {
+                "llm_time": 0.0,
+                "status": "LLM reinforcement was disabled.",
+                "num_chunks": 0, "modifications": 0, "modification_ratio": 0.0
+            }
+            return "", llm_metadata
+        
+        llm_start = time.time()
+        response = self.REINFORCER.main(
+            fusion_tokens=fusion_tokens,
+            candidate_tokens=candidates_tokens,
+            max_tokens=self.max_tokens,
+            chunk_size=self.chunk_size,
+            overlap=self.overlap,
+        )
+        llm_time = time.time() - llm_start
+        llm_transcript, llm_metadata = postprocess_reinforced_output(response)
+        llm_metadata["llm_time"] = llm_time
+        return llm_transcript, llm_metadata    
+
+
+class HybridEnsemble:
+    def __init__(self):
+        self._input_to_fusion = {}
+        self._samples_info = {}
+        self._processed_results = []
+        self._overall_metrics = None
+
+        
+    def combine_models_transcriptions(self, *samples_dicts, missing_value=""):
+        """
+        Align multiple samples_info dicts into an audio-centric structure.
+
+        Args:
+            *samples_dicts: Each is a dict like {audio_path: {normalized_prediction: str}}
+            missing_value (str): Placeholder when a dict has no prediction for a sample.
+
+        Returns:
+            dict: {audio_path: [transcript_from_model1, transcript_from_model2, ...]}
+        """
+        if not samples_dicts:
+            return {}
+
+        # Collect all unique audio paths
+        all_audio_paths = sorted({path for d in samples_dicts for path in d.keys()})
+        # Build combined dict
+        combined = {}
+        for audio_path in all_audio_paths:
+            combined[audio_path] = []
+            for d in samples_dicts:
+                if audio_path in d:
+                    transcript = d[audio_path].get("normalized_prediction", missing_value)
+                else:
+                    transcript = missing_value
+                combined[audio_path].append(transcript)
+
+        self._input_to_fusion = combined
+
+    def main(self, filter_params={"mode": "mean"}, reference_params={"lengthmode": "iqr", "matchmode": "mean"}, 
+             reinforcer_params={"use_llm": False, "max_tokens":25, "chunk_size":15, "overlap":3}):
         def fuse_sample_transcriptions(audio_path, transcriptions):
             transcriptions_copy = list(transcriptions)
             fusion_start = time.time()
-            filtered_transcriptions, filtration_metadata = TranscriptFilter().main(transcriptions_copy)
-            reference_type, reference, reference_metadata = self.get_reference_from_transcriptions(filtered_transcriptions)
-            alignment_results, alignment_metadata = self.align_transcriptions_to_reference(reference=reference, reference_type=reference_type, 
-                                                                                           reference_index=reference_metadata["reference_index"], 
-                                                                                           transcriptions=filtered_transcriptions)
-            fusion_transcript, voting_metadata = self.token_voting_scheme(alignment_results)
-            llm_transcript, llm_metadata = self.llm_reinforcer(
-                fusion_tokens=voting_metadata["fusion_tokens"],
-                candidates_tokens=voting_metadata["candidates_tokens"],
-                max_tokens=kwargs.get("max_tokens", 25),
-                chunk_size=kwargs.get("chunk_size", 15),
-                overlap=kwargs.get("overlap", 3),
-            )
+            filtered_transcriptions, filtration_metadata = TranscriptFilter(**filter_params).main(transcriptions_copy)
+            reference_type, reference, reference_metadata = ReferenceSelection(**reference_params).main(filtered_transcriptions)
+            alignment_results, alignment_metadata = Alignment().main(reference=reference, reference_type=reference_type, 
+                                                                     reference_index=reference_metadata["reference_index"], 
+                                                                     transcriptions=filtered_transcriptions)
+            fusion_transcript, voting_metadata = TokenLevelVoting().main(alignment_results)
+            llm_transcript, llm_metadata = VotingReinforcer(**reinforcer_params).main(fusion_tokens=voting_metadata["fusion_tokens"],
+                                                                                      candidates_tokens=voting_metadata["candidates_tokens"])
             data = {
                 # --- Primary Outputs ---
                 "fusion_transcript": fusion_transcript,

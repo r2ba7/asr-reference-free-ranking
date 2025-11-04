@@ -1067,11 +1067,9 @@ class HybridEnsemble:
         self._samples_info = dict(sorted(samples_info.items()))
 
     def eval(self, audios_chunk):
-        def _eval_common(data):
-            return data["fusion_transcript"]
-
-        def _eval_llm(data):
-            return data["llm_transcript"]
+        def fetch_transcript(data):
+            llm_t = data.get("llm_transcript")
+            return data["fusion_transcript"] if not llm_t or not llm_t.strip() else llm_t
 
         refs_lookup = {sample["audio_path"]: sample["normalized_transcription"] for sample in audios_chunk}
         all_audio_paths = list(self._samples_info.keys())
@@ -1079,8 +1077,8 @@ class HybridEnsemble:
             if audio_path in self._samples_info:
                 try:
                     ref = refs_lookup.get(audio_path)
-                    hyp = _eval_llm(self._samples_info[audio_path]) if self.use_llm else _eval_common(self._samples_info[audio_path])
-                    self._samples_info[audio_path]["normalized_prediction"] = text_processing.StandardArabicTextProcessor.main(hyp, substitute=True)
+                    hyp = fetch_transcript(self._samples_info[audio_path])
+                    self._samples_info[audio_path]["normalized_prediction"] = text_processing.StandardArabicTextProcessor.main(hyp)
                     self._samples_info[audio_path]["normalized_transcription"] = ref
                     if ref is not None:
                         norm_hyp = self._samples_info[audio_path]["normalized_prediction"]
@@ -1157,6 +1155,13 @@ class HybridEnsemble:
         
         return self._samples_info
     
+    @samples_info.setter
+    def samples_info(self, value):
+        """
+        Set the input to fusion dictionary.
+        """
+        self._samples_info = value
+
     @property
     def overall_metrics(self):
         return self._overall_metrics

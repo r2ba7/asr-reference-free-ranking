@@ -240,3 +240,120 @@ class StandardArabicTextProcessor:
         processed_texts = StandardArabicTextProcessor.normalize_characters(processed_texts)
         processed_texts = StandardArabicTextProcessor.clean_whitespace(processed_texts)
         return processed_texts[0] if is_single_input else processed_texts
+    
+class StandardEnglishTextProcessor:
+    """
+    A comprehensive English text processor for LibriSpeech ASR tasks, handling cleaning,
+    normalization, and text standardization.
+    All functions operate on lists for optimal bulk processing.
+    """
+    
+    # Symbols and special characters to remove
+    SYMBOLS_TO_REMOVE = re.compile(r'[<>\-_\[\]{}().,;:!?"\'/\\|~`^*+=&$#@%]')
+    
+    # Non-English letters pattern
+    NON_ENGLISH_LETTERS = re.compile(r'[^a-zA-Z0-9\s]')
+
+    @staticmethod
+    def convert_to_lowercase(texts: List[str]) -> List[str]:
+        """
+        Convert all text to lowercase.
+        """
+        return [text.lower() for text in texts]
+
+    @staticmethod
+    def remove_symbols(texts: List[str]) -> List[str]:
+        """
+        Remove all symbols while keeping English letters, numbers, and spaces.
+        
+        Args:
+            texts (List[str]): List of input texts
+            
+        Returns:
+            List[str]: List of texts with symbols removed
+        """
+        return [StandardEnglishTextProcessor.SYMBOLS_TO_REMOVE.sub('', text) for text in texts]
+
+    @staticmethod
+    def remove_non_english_characters(texts: List[str]) -> List[str]:
+        """
+        Remove all non-English characters, keeping only a-z, A-Z, 0-9, and spaces.
+        
+        Args:
+            texts (List[str]): List of input texts
+            
+        Returns:
+            List[str]: List of texts with non-English characters removed
+        """
+        return [StandardEnglishTextProcessor.NON_ENGLISH_LETTERS.sub('', text) for text in texts]
+
+    @staticmethod
+    def remove_punctuation(texts: List[str]) -> List[str]:
+        """
+        Remove punctuation from texts using Unicode categories.
+        
+        Args:
+            texts (List[str]): List of input texts
+            
+        Returns:
+            List[str]: List of texts with punctuation removed
+        """
+        processed_texts = []
+        for text in texts:
+            cleaned_text = ''.join(char for char in text if not (
+                unicodedata.category(char).startswith('P') or
+                unicodedata.category(char).startswith('S')
+            ))
+            processed_texts.append(cleaned_text)
+        return processed_texts
+
+    @staticmethod
+    def normalize_whitespace(texts: List[str]) -> List[str]:
+        """
+        Clean excessive whitespace - remove multiple spaces and trim.
+        
+        Args:
+            texts (List[str]): List of input texts
+            
+        Returns:
+            List[str]: List of texts with cleaned whitespace
+        """
+        return [re.sub(r'\s+', ' ', text.strip()) for text in texts]
+
+    @staticmethod
+    def main(texts: Union[str, List[str]]) -> Union[str, List[str]]:
+        """
+        Process English text(s) through the complete text processing pipeline.
+        All processing is done in bulk mode for optimal performance.
+        
+        Args:
+            texts (str or List[str]): Input text(s) to process
+            
+        Returns:
+            str or List[str]: Processed text(s) - same type as input
+        """
+        # Convert single string to list for uniform processing
+        is_single_input = isinstance(texts, str)
+        if is_single_input:
+            texts = [texts]
+        elif isinstance(texts, list):
+            pass
+        else:
+            raise TypeError("Input must be either a string or a list of strings")
+
+        # Step 1: Remove symbols
+        processed_texts = StandardEnglishTextProcessor.remove_symbols(texts)
+
+        # Step 2: Remove punctuation
+        processed_texts = StandardEnglishTextProcessor.remove_punctuation(processed_texts)
+
+        # Step 3: Remove non-English characters
+        processed_texts = StandardEnglishTextProcessor.remove_non_english_characters(processed_texts)
+
+        # Step 4: Convert to lowercase
+        processed_texts = StandardEnglishTextProcessor.convert_to_lowercase(processed_texts)
+
+        # Step 5: Normalize whitespace
+        processed_texts = StandardEnglishTextProcessor.normalize_whitespace(processed_texts)
+
+        return processed_texts[0] if is_single_input else processed_texts

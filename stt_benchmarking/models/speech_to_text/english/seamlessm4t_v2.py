@@ -20,9 +20,9 @@ def map_to_seamless_lang(accent):
     if not accent or pd.isna(accent) or str(accent).strip() == "":
         return "arb"
     a = accent.lower()
-    if any(x in a for x in ["fusha", "فصح", "msa", "standard", "العربية", "فصحى", "فصحة"]):
+    if any(x in a for x in ["fusha", "فصح", "msa", "standard", "العربية", "فصحى", "فصحة", "Saudi"]):
         return "arb"
-    if any(x in a for x in ["egypt", "مصري", "مصرية", "arz", "egyptian"]):
+    if any(x in a for x in ["egypt", "مصري", "مصرية", "arz", "egyptian", "Egypt"]):
         return "arz"
     if any(x in a for x in ["darija", "maghreb", "magherbine", "morro", "تطوان", "مغربية", "تونس", "الجزائر", "شمال أفريقيا"]):
         return "ary"
@@ -116,7 +116,7 @@ class SeamlessM4TFullInterface:
         return pipe
 
     @decorators.Decorators.calculate_execution_time 
-    def run_inference_one_by_one(self, records, lang_id):
+    def run_inference_one_by_one(self, records):
         """
         Run inference on audio records one by one and compute metrics.
         
@@ -133,9 +133,7 @@ class SeamlessM4TFullInterface:
             transcription = record["transcription"]
             normalized_transcription = record["normalized_transcription"]
             duration = record["audio_duration"]
-            accent = record.get("accent", None)
-            if lang_id is None:
-                lang_id = map_to_seamless_lang(accent)
+            lang_id = "en"
             all_audio_paths.append(audio_path)
             try:
                 start_time = time.time()
@@ -171,7 +169,7 @@ class SeamlessM4TFullInterface:
         self._finalize_info(all_audio_paths=all_audio_paths)
     
     @decorators.Decorators.calculate_execution_time
-    def run_batch_inference(self, records, lang_id):
+    def run_batch_inference(self, records):
         """
         Run batch inference using Hugging Face Dataset for better efficiency.
         Selects best language by evaluating on a sample subset.
@@ -184,8 +182,7 @@ class SeamlessM4TFullInterface:
         def process_batch(batch):
             batch_audio = batch["waveform"]
             batch_audio = [np.array(audio, dtype=np.float32) if not isinstance(audio, np.ndarray) else audio for audio in batch_audio]
-            if lang_id is None:
-                lang_id = "arb"
+            lang_id = "en"
             with torch.no_grad():
                 try:
                     results = self.pipe(
@@ -272,7 +269,7 @@ class SeamlessM4TFullInterface:
         self._finalize_info(all_audio_paths=all_audio_paths)
 
     @decorators.Decorators.calculate_execution_time
-    def run_inference_optimized(self, records, lang_id=None, duration_threshold=30.0):
+    def run_inference_optimized(self, records, duration_threshold=30.0):
         """
         Run inference using the best method depending on audio length.
         
@@ -286,14 +283,14 @@ class SeamlessM4TFullInterface:
 
         short_records = [r for r in records if r["audio_duration"] < duration_threshold]
         long_records  = [r for r in records if r["audio_duration"] >= duration_threshold]
-
+        
         if short_records:
             LOGGER.info(f"Running one-by-one inference on {len(short_records)} short files (<{duration_threshold}s)")
-            self.run_inference_one_by_one(short_records, lang_id)
+            self.run_inference_one_by_one(short_records)
 
         if long_records:
             LOGGER.info(f"Running batch inference on {len(long_records)} long files (≥{duration_threshold}s)")
-            self.run_batch_inference(long_records, lang_id)
+            self.run_batch_inference(long_records)
 
         refs = [v["normalized_transcription"] for v in self._samples_info.values()]
         hyps = [v["normalized_prediction"] for v in self._samples_info.values()]

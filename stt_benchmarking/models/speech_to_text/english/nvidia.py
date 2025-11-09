@@ -2,8 +2,9 @@ import gc
 import time
 
 import torch
-from transformers import AutoProcessor, AutoModelForCTC
 from tqdm import tqdm
+import nemo.collections.asr as nemo_asr
+from nemo.collections.asr.models import ASRModel
 
 from .. import LOGGER
 from stt_benchmarking.utils import (
@@ -13,41 +14,42 @@ from stt_benchmarking.utils import (
     helpers
 )
 
-class w2vBERTInference:
-    def __init__(self, device):
+class NvidiaInference:
+    def __init__(self, device, model_id):
         """
         Initialize the HubertArabicInference class.
 
         Args:
             device (str or torch.device): Device to run the model on ('cuda' or 'cpu')
+            model_id: either 'canary', 'parakeet', 'conformer'
         """
-        self.device = device if isinstance(device, torch.device) else torch.device(device)
-        self.model, self.processor = self._load_model()
-        self.dtype = self.model.dtype
         self._overall_metrics = None
         self._samples_info = {}
+        self.device = torch.device(device)
+        self.model = self._load_model(model_id)
+        # Add timing/memory tracking
         self._total_inference_time = 0.0
         self._total_audio_duration = 0.0
         self._processed_count = 0
 
-    def _load_model(self):
+    def _load_model(self, model_id):
         """
         Load the HuBERT Arabic model and processor.
 
         Returns:
             tuple: (model, processor)
         """
-        MODEL_ID = "whitefox123/w2v-bert-2.0-arabic-4"
-        processor = AutoProcessor.from_pretrained(MODEL_ID)
-        model = AutoModelForCTC.from_pretrained(
-            MODEL_ID,
-            torch_dtype=torch.float16 if self.device.type == "cuda" else torch.float32
-        ).to(self.device)
-
-        model.eval()
-        LOGGER.info(f"Loaded model w2v Bert Arabic")
-        return model, processor
-
+        if model_id == "canary":
+            model = nemo_asr.models.ASRModel.from_pretrained(model_name="nvidia/canary-1b-v2", map_location=self.device)
+        elif model_id == "parakeet":
+            model = nemo_asr.models.ASRModel.from_pretrained(model_name="nvidia/parakeet-tdt-0.6b-v2", map_location=self.device)
+        elif model_id == "conformer":
+            model = nemo_asr.models.EncDecCTCModelBPE.from_pretrained("nvidia/stt_en_conformer_ctc_large")
+        else:
+            raise ValueError("Wrong nvidia model, one of 'canary', 'parakeet', 'conformer'")
+        LOGGER.info(f"Loaded model nvidia {model_id}")
+        return model
+    
     @decorators.Decorators.calculate_execution_time
     def run_inference_one_by_one(self, records):
         """
@@ -64,22 +66,13 @@ class w2vBERTInference:
             transcription = record['transcription']
             normalized_transcription = record['normalized_transcription']
             duration = record["audio_duration"]
-            waveform = record["waveform"]
             all_audio_paths.append(audio_path)
             try:
                 # Time inference
                 start_time = time.time()
-                inputs = self.processor(
-                    audio=waveform,
-                    sampling_rate=record['sample_rate'],
-                    return_tensors="pt",
-                ).to(self.device, dtype=self.dtype)
-                input_features = inputs["input_features"].to(self.device, dtype=self.dtype)
-                with torch.no_grad():
-                    logits = self.model(input_features).logits
-
-                predicted_ids = torch.argmax(logits, dim=-1)
-                raw_prediction = self.processor.decode(predicted_ids[0])
+                output = self.model.transcribe([audio_path], source_lang='en', target_lang='en', return_hypotheses=True, batch_size=64)
+                hypothesis = output[0]
+                raw_prediction = hypothesis.text
                 inference_time = time.time() - start_time
                 if self._processed_count > 4:
                     self._total_inference_time += inference_time
@@ -102,6 +95,7 @@ class w2vBERTInference:
             }
                 
         self._finalize_info(all_audio_paths=all_audio_paths)
+        
     def _finalize_info(self, all_audio_paths):
         """
         Finalize predictions by normalizing them and computing metrics for each sample.
@@ -186,7 +180,7 @@ class w2vBERTInference:
             torch.cuda.ipc_collect()
             torch.cuda.reset_peak_memory_stats()
     
-        LOGGER.info("W2v Bert instance has been reset. Model and processor remain loaded.")
+        LOGGER.info("Fastconformer_hybridInference instance has been reset. Model remains loaded.")
 
     @property
     def samples_info(self):

@@ -200,6 +200,7 @@ def add_noise_to_audio(audio_data, sample_rate, folder_files_map, snr_choices=(5
         return audio_data
 
 class RDI_TTS_Inference:
+    NOISE_DATASET_DIR = "../../data/noise_datasets"
     URL = "http://34.57.97.217:6017/speak"
     DATA = {
         "format": "json", 
@@ -210,12 +211,11 @@ class RDI_TTS_Inference:
         "speed": 1, 
         "output_format": "wav"
     }
-    CLEAN_OUTPUT_DIR = "../../data/scrapped_data/social_media/waves/clean"
-    NOISY_OUTPUT_DIR = "../../data/scrapped_data/social_media/waves/noisy"
-    NOISE_DIR = "../../data/noise_datasets"
 
-    def __init__(self):
-        self.folder_files_map = load_noise_files(self.NOISE_DIR)
+    def __init__(self, CLEAN_OUTPUT_DIR, NOISY_OUTPUT_DIR):
+        self.CLEAN_OUTPUT_DIR = CLEAN_OUTPUT_DIR
+        self.NOISY_OUTPUT_DIR = NOISY_OUTPUT_DIR
+        self.folder_files_map = load_noise_files(self.NOISE_DATASET_DIR)
 
     @decorators.Decorators.timeout_with_retry
     def process_single_file(self, text, index):
@@ -290,7 +290,6 @@ class RDI_TTS_Inference:
         
         paths = [results.get(idx) for idx in df.index]
         success_count = sum(1 for p in paths if p is not None)
-        
         LOGGER.info(f"Generated {success_count}/{len(df)} clean files")
         return paths
 

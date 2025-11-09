@@ -7,3 +7,4 @@ reports/
 *.py[cod]
 *.docx
 *.env
+*.parquet

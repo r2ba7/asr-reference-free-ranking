@@ -278,9 +278,6 @@ class FusionReinforcer:
     MAX_NORMALIZED_EDIT_DISTANCE = 0.33
     MAX_RETRIES = 3
 
-    def __init__(self):
-        print(52)
-
     # No changes needed for _chunk_needed, _format_sentence_table, _prepare_chunked_operations
     # These methods correctly handle data preparation.
     def _chunk_needed(self, fusion_tokens, max_tokens):

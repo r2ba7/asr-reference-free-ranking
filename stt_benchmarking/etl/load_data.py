@@ -4,7 +4,10 @@ import torchaudio
 import pandas as pd
 
 from stt_benchmarking.utils import text_processing
+from stt_benchmarking.utils.english_normalizer import normalizer
 from . import LOGGER
+
+
 
 def load_audio_transcripts(data_dir, sep, metadata_file_name="metadata.txt", **kwargs):
     if not os.path.isdir(data_dir):
@@ -141,8 +144,6 @@ def load_mozilla_cv(df, audio_path, **kwargs):
     
     return samples
 
-import os
-import torchaudio
 
 def load_librispeech(data_dir, target_sr=16000, **kwargs):
     """
@@ -156,12 +157,12 @@ def load_librispeech(data_dir, target_sr=16000, **kwargs):
     Returns:
         list[dict]: [{'audio_path', 'waveform', 'sample_rate', 'transcription', 'audio_duration'}]
     """
+    eng_normalizer = normalizer.EnglishTextNormalizer()
+    
     if not os.path.isdir(data_dir):
         raise FileNotFoundError(f"Directory '{data_dir}' does not exist.")
 
     samples = []
-    transcriptions = []
-
     # Traverse speaker directories recursively
     for speaker_id in os.listdir(data_dir):
         speaker_path = os.path.join(data_dir, speaker_id)
@@ -209,17 +210,9 @@ def load_librispeech(data_dir, target_sr=16000, **kwargs):
                         "waveform": waveform,
                         "sample_rate": sample_rate,
                         "transcription": transcription,
-                        "audio_duration": duration_sec
+                        "audio_duration": duration_sec,
+                        "normalized_transcription": eng_normalizer(transcription)
                     })
-
-                    transcriptions.append(transcription)
-
-    # Optional normalization stage
-    if transcriptions:
-        normalized = text_processing.StandardEnglishTextProcessor.main(texts=transcriptions)
-        for i, sample in enumerate(samples):
-            sample["normalized_transcription"] = normalized[i]
-
     return samples
 
 def load_reddit_audios(json_path="../../data/scrapped_data/social_media/reddit_df_full.json", 

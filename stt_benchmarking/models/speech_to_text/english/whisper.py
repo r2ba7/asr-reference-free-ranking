@@ -1,14 +1,11 @@
 import gc
 import time
 
-from datasets import Dataset
 import torch
-from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 from tqdm import tqdm
 from faster_whisper import WhisperModel, BatchedInferencePipeline
-import numpy as np
 
-from .. import LOGGER
+from . import LOGGER, NORMALIZER_OBJ
 from stt_benchmarking.utils import (
     helpers, 
     decorators, 
@@ -64,7 +61,6 @@ class FasterWhisperInference:
         LOGGER.info(f"Loaded Whisper {self.model_version.upper()} Pipeline")
         return pipe
 
-
     @decorators.Decorators.calculate_execution_time 
     def run_inference_one_by_one(self, records):
         """
@@ -91,8 +87,8 @@ class FasterWhisperInference:
                     task="transcribe"
                 )
                 raw_prediction = " ".join([seg.text for seg in segments])
+                normalized_prediction = NORMALIZER_OBJ(raw_prediction)
                 end_time = time.time()
-                
                 inference_time = end_time - start_time
                 
                 # Track timing (skip first 5 for warmup)
@@ -105,12 +101,13 @@ class FasterWhisperInference:
                 LOGGER.error(f"⚠️ Sample {i+1}, Name: {audio_path}, failed: {e}")
                 inference_time = None
                 raw_prediction = ""
+                normalized_prediction = ""
 
             self._samples_info[audio_path] = {
                 "raw_transcription": transcription,
                 "normalized_transcription": normalized_transcription,
                 "raw_prediction": raw_prediction,
-                "normalized_prediction": None,
+                "normalized_prediction": normalized_prediction,
                 "duration": duration,
                 "inference_time": inference_time,
                 "rtf": inference_time / duration if (inference_time and duration > 0) else None,
@@ -146,6 +143,7 @@ class FasterWhisperInference:
 
                 # Concatenate all segment texts
                 raw_prediction = " ".join([seg.text for seg in segments])
+                normalized_prediction = NORMALIZER_OBJ(raw_prediction)
                 inference_time = time.time() - start_time
                 if self._processed_count > 4:
                     self._total_inference_time += inference_time
@@ -156,12 +154,13 @@ class FasterWhisperInference:
                 LOGGER.error(f"⚠️ Sample {i+1}, Name: {audio_path}, failed: {e}")
                 inference_time = None
                 raw_prediction = ""
+                normalized_prediction = ""
 
             self._samples_info[audio_path] = {
                 "raw_transcription": transcription,
                 "normalized_transcription": normalized_transcription,
                 "raw_prediction": raw_prediction,
-                "normalized_prediction": None,
+                "normalized_prediction": normalized_prediction,
                 "duration": duration,
                 "inference_time": inference_time,
                 "rtf": inference_time / duration if (inference_time and duration > 0) else None,
@@ -181,8 +180,6 @@ class FasterWhisperInference:
         for i, audio_path in enumerate(all_audio_paths):
             if audio_path in self._samples_info:
                 try:
-                    prediction = self._samples_info[audio_path]["raw_prediction"]
-                    self._samples_info[audio_path]["normalized_prediction"] = text_processing.StandardArabicTextProcessor.main(prediction, substitute=True)
                     sample_metrics = metrics.BasicSTTMetrics.evaluate(
                         refs=self._samples_info[audio_path]["normalized_transcription"],
                         hyps=self._samples_info[audio_path]["normalized_prediction"],
@@ -191,12 +188,10 @@ class FasterWhisperInference:
                 except Exception as e:
                     LOGGER.error(f"Error processing sample {i+1}, Name: {audio_path}, failed: {e}")
                     self._samples_info[audio_path] = {
-                        "normalized_prediction": None,
                         "metrics":  helpers._empty_metrics()
                     }
             else:
                 self._samples_info[audio_path] = {
-                    "normalized_prediction": None,
                     "metrics":  helpers._empty_metrics()
                 }
 

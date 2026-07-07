@@ -30,7 +30,7 @@ class TranscriptFilter:
             """Calculates the similarity ratio (0-100) based on matching *words*."""
             if not words1 and not words2: return 100.0
             if not words1 or not words2: return 0.0
-            matcher = difflib.SequenceMatcher(None, words1, words2)
+            matcher = difflib.SequenceMatcher(None, words1, words2, autojunk=False)
             return matcher.ratio() * 100.0
         
         num_systems = len(transcriptions)
@@ -115,7 +115,7 @@ class TranscriptFilter:
             "agreement_scores": agreement_scores.tolist(),
             "significant_gaps": significant_gaps.tolist(),
             "dynamic_threshold": float(dynamic_threshold),
-            # "largest_gap": float(gaps[largest_gap_idx]),
+            
             "kept_indices": kept_indices.tolist(),
             "filtered_indices": filtered_indices.tolist(),
             "num_models": len(transcriptions),

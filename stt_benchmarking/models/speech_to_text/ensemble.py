@@ -36,7 +36,7 @@ class TranscriptFilter:
             """Calculates the similarity ratio (0-100) based on matching *words*."""
             if not words1 and not words2: return 100.0
             if not words1 or not words2: return 0.0
-            matcher = difflib.SequenceMatcher(None, words1, words2)
+            matcher = difflib.SequenceMatcher(None, words1, words2, autojunk=False)
             return matcher.ratio() * 100.0
         
         num_systems = len(transcriptions)
@@ -61,10 +61,10 @@ class TranscriptFilter:
         """
         num_transcriptions = len(transcriptions)
         
-        if num_transcriptions < 3:
+        if num_transcriptions < 4:
             return transcriptions, {
                 "status": "Skipped", 
-                "reason": "Need ≥3 transcripts",
+                "reason": "Need ≥4 transcripts",
                 "kept_indices": list(range(num_transcriptions)), 
                 "filtered_indices": []
             }
@@ -101,7 +101,7 @@ class TranscriptFilter:
         if len(significant_gaps) == 0:
             return transcriptions, {
                 "status": "Skipped",
-                "reason": "Cannot compute gaps",
+                "reason": "No significant gap detected; distribution treated as unimodal",
                 "kept_indices": list(range(num_transcriptions)),
                 "filtered_indices": []
             }
@@ -121,7 +121,7 @@ class TranscriptFilter:
             "agreement_scores": agreement_scores.tolist(),
             "significant_gaps": significant_gaps.tolist(),
             "dynamic_threshold": float(dynamic_threshold),
-            # "largest_gap": float(gaps[largest_gap_idx]),
+            
             "kept_indices": kept_indices.tolist(),
             "filtered_indices": filtered_indices.tolist(),
             "num_models": len(transcriptions),

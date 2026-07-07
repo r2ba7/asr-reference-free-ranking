@@ -11,7 +11,6 @@ import pandas as pd
 from . import LOGGER, NORMALIZER_OBJ
 from stt_benchmarking.utils import (
     helpers,
-    text_processing, 
     decorators, 
     metrics
 )
@@ -133,7 +132,6 @@ class SeamlessM4TFullInterface:
             transcription = record["transcription"]
             normalized_transcription = record["normalized_transcription"]
             duration = record["audio_duration"]
-            lang_id = "en"
             all_audio_paths.append(audio_path)
             try:
                 start_time = time.time()
@@ -143,7 +141,7 @@ class SeamlessM4TFullInterface:
                     return_tensors="pt"
                 ).to(self.device, dtype=self.dtype)
                 with torch.no_grad():
-                    output_tokens = self.model.generate(**inputs, tgt_lang=lang_id) 
+                    output_tokens = self.model.generate(**inputs, tgt_lang="eng") 
                 raw_prediction = self.processor.decode(output_tokens[0], skip_special_tokens=True)
                 normalized_prediction = NORMALIZER_OBJ(raw_prediction)
                 inference_time = time.time() - start_time
@@ -184,13 +182,12 @@ class SeamlessM4TFullInterface:
         def process_batch(batch):
             batch_audio = batch["waveform"]
             batch_audio = [np.array(audio, dtype=np.float32) if not isinstance(audio, np.ndarray) else audio for audio in batch_audio]
-            lang_id = "en"
             with torch.no_grad():
                 try:
                     results = self.pipe(
                         batch_audio,
                         batch_size=len(batch_audio),
-                        generate_kwargs={"tgt_lang": lang_id, 
+                        generate_kwargs={"tgt_lang": "eng", 
                                         "num_beams": 4,
                                         "do_sample": False,
                                         "no_repeat_ngram_size": 2}

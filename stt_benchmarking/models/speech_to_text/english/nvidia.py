@@ -70,7 +70,7 @@ class NvidiaInference:
             try:
                 # Time inference
                 start_time = time.time()
-                output = self.model.transcribe([audio_path], source_lang='en', target_lang='en', return_hypotheses=True, batch_size=64)
+                output = self.model.transcribe([audio_path], return_hypotheses=True, batch_size=64, verbose=False)
                 hypothesis = output[0]
                 raw_prediction = hypothesis.text
                 normalized_prediction = NORMALIZER_OBJ(raw_prediction)

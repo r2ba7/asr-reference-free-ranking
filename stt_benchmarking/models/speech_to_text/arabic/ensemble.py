@@ -36,7 +36,7 @@ class TranscriptFilter:
             """Calculates the similarity ratio (0-100) based on matching *words*."""
             if not words1 and not words2: return 100.0
             if not words1 or not words2: return 0.0
-            matcher = difflib.SequenceMatcher(None, words1, words2)
+            matcher = difflib.SequenceMatcher(None, words1, words2, autojunk=False)
             return matcher.ratio() * 100.0
         
         num_systems = len(transcriptions)
@@ -61,10 +61,10 @@ class TranscriptFilter:
         """
         num_transcriptions = len(transcriptions)
         
-        if num_transcriptions < 3:
+        if num_transcriptions < 4:
             return transcriptions, {
                 "status": "Skipped", 
-                "reason": "Need ≥3 transcripts",
+                "reason": "Need ≥4 transcripts",
                 "kept_indices": list(range(num_transcriptions)), 
                 "filtered_indices": []
             }
@@ -101,7 +101,7 @@ class TranscriptFilter:
         if len(significant_gaps) == 0:
             return transcriptions, {
                 "status": "Skipped",
-                "reason": "Cannot compute gaps",
+                "reason": "No significant gap detected; distribution treated as unimodal",
                 "kept_indices": list(range(num_transcriptions)),
                 "filtered_indices": []
             }
@@ -121,7 +121,7 @@ class TranscriptFilter:
             "agreement_scores": agreement_scores.tolist(),
             "significant_gaps": significant_gaps.tolist(),
             "dynamic_threshold": float(dynamic_threshold),
-            # "largest_gap": float(gaps[largest_gap_idx]),
+            
             "kept_indices": kept_indices.tolist(),
             "filtered_indices": filtered_indices.tolist(),
             "num_models": len(transcriptions),
@@ -138,8 +138,8 @@ class ReferenceSelection:
         self.__verify_mode()
     
     def __verify_mode(self):
-        if self.matchmode and self.lengthmode not in ["mean", "iqr"]:
-            raise ValueError("mode should be either mean or iqr.")
+        if self.lengthmode not in ["mean","iqr"] or self.matchmode not in ["mean","iqr"]:
+            raise ValueError("lengthmode and matchmode must be 'mean' or 'iqr'.")
         
     def main(self, transcriptions):
         def get_longest_reference(transcriptions):
@@ -150,28 +150,30 @@ class ReferenceSelection:
                 Returns:
                     tuple: (is_valid, anchor_info)
                 """
-                def find_first_anchors(reference_sentence, compared_sentence):
-                    ref_words = reference_sentence.split()
-                    comp_words = compared_sentence.split()
-                    for i, ref_word in enumerate(ref_words):
-                        for j, comp_word in enumerate(comp_words):
-                            if ref_word == comp_word:
-                                return (i, j)
-                    return None
+                def find_first_anchors(reference_sentence,compared_sentence):
+                    ref_words=reference_sentence.split()
+                    comp_words=compared_sentence.split()
+                    best=None
+                    for i,ref_word in enumerate(ref_words):
+                        for j,comp_word in enumerate(comp_words):
+                            if ref_word==comp_word and (best is None or (i+j)<(best[0]+best[1])):
+                                best=(i,j)
+                    return best
                 
                 if not reference or not transcription: return False, None
                 anchors = find_first_anchors(reference, transcription)
                 if not anchors: return False, None
                     
-                ref_pos, trans_pos = anchors
-                ref_words = reference.split()
-                trans_words = transcription.split()
-                ref_remaining = ref_words[ref_pos:]
-                trans_remaining = trans_words[trans_pos:]
-                matcher = SequenceMatcher(None, ref_remaining, trans_remaining)
-                longest_match = matcher.find_longest_match(0, len(ref_remaining), 0, len(trans_remaining))
-                additional_matches = longest_match.size
-                shorter_sequence_length = min(len(ref_remaining), len(trans_remaining))
+                ref_pos,trans_pos=anchors
+                ref_words=reference.split()
+                trans_words=transcription.split()
+                ref_remaining=ref_words[ref_pos:]
+                trans_remaining=trans_words[trans_pos:]
+                matcher=SequenceMatcher(None,ref_remaining,trans_remaining,autojunk=False)
+                longest_match=matcher.find_longest_match(0,len(ref_remaining),0,len(trans_remaining))
+                additional_matches=longest_match.size
+                shorter_sequence_length=min(len(ref_remaining),len(trans_remaining))
+                category_length=min(len(ref_words),len(trans_words))
                 min_required = 0
                 if shorter_sequence_length == 0: return False, None
                 if length_stats is None or match_stats is None:

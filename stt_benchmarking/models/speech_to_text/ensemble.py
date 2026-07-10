@@ -917,7 +917,7 @@ class TokenLevelVoting:
             'confidence_score': confidence_score,
             'total_models': total_models,
             'sequence_length': sequence_length,
-            'selection_method': 'token_majority_vote',
+            'selection_method': 'token_plurality_vote',
             'voting_details': voting_details
         }
 

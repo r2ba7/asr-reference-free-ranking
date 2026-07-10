@@ -14,7 +14,6 @@ from Levenshtein import distance
 import pandas as pd
 from scipy.cluster.hierarchy import linkage, fcluster
 from scipy.spatial.distance import squareform
-from kneed import KneeLocator
 
 
 from stt_benchmarking.utils import text_processing, helpers, metrics
@@ -27,8 +26,8 @@ class TranscriptFilter:
         self.__verify_mode()
     
     def __verify_mode(self):
-        if self.mode not in ["mean", "iqr"]:
-            raise ValueError("mode should be either mean or iqr.")
+        if self.mode not in ["mean", "iqr", "mad"]:
+            raise ValueError("mode should be mean, iqr, or mad.")
         
     def _calculate_similarity_matrix(self, transcriptions: List[str]) -> pd.DataFrame:
         """Creates an N*N pairwise similarity matrix for all transcriptions."""
@@ -92,11 +91,16 @@ class TranscriptFilter:
         gaps = np.diff(sorted_scores)
         if self.mode == "mean":
             significant_gaps = np.where(gaps > np.mean(gaps) + np.std(gaps))[0]
-        else:
+        elif self.mode == "iqr":
             q1, q3 = np.percentile(gaps, [25, 75])
             iqr = q3 - q1
             upper_fence = q3 + (1.5 * iqr)
             significant_gaps = np.where(gaps > upper_fence)[0]
+        else:
+            median = np.median(gaps)
+            mad = np.median(np.abs(gaps - median))
+            scale = 1.4826 * mad
+            significant_gaps = np.where(gaps > median + 3.0 * scale)[0]
 
         if len(significant_gaps) == 0:
             return transcriptions, {
@@ -917,7 +921,7 @@ class TokenLevelVoting:
             'confidence_score': confidence_score,
             'total_models': total_models,
             'sequence_length': sequence_length,
-            'selection_method': 'token_majority_vote',
+            'selection_method': 'token_plurality_vote',
             'voting_details': voting_details
         }
 

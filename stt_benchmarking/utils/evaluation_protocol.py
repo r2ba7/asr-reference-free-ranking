@@ -22,6 +22,7 @@ Contract for `model_samples`: {name: {audio_path: {"normalized_prediction": str,
   "normalized_transcription": str, "metrics": <BasicSTTMetrics.evaluate output>}}}
 """
 
+import inspect
 import itertools
 import json
 import os
@@ -66,11 +67,13 @@ class EvaluationProtocol:
 
     def __init__(self, model_samples, voters, ensemble_factory,
                  outdir="protocol_out", n_boot=1000, seed=42,
-                 min_pool_size=3, full_ensemble_samples=None):
+                 min_pool_size=3, full_ensemble_samples=None,
+                 main_kwargs=None):
         self.ms = model_samples
         self.voters = list(voters)
         self.ranked_only = [n for n in model_samples if n not in self.voters]
         self.factory = ensemble_factory
+        self.main_kwargs = self._filter_main_kwargs(main_kwargs or {})
         self.outdir = outdir
         self.n_boot = n_boot
         self.rng = np.random.default_rng(seed)
@@ -96,10 +99,28 @@ class EvaluationProtocol:
                 {p: full_ensemble_samples[p]["metadata"] for p in keep},
                 self.voters,
             )
-        self.report = {"skipped_empty_gt": len(self.skipped_empty_gt)}
-        self._score_cache = {}  
+        self.report = {"skipped_empty_gt": len(self.skipped_empty_gt),
+                       "main_kwargs_applied": dict(self.main_kwargs),
+                       "main_kwargs_dropped": getattr(self, "_dropped_main_kwargs", [])}
+        self._score_cache = {}
 
     # ---------- fusion and scoring, cached ----------
+    def _filter_main_kwargs(self, kw):
+        """Keep only kwargs the ensemble's main() actually accepts.
+        An older ensemble without substitute / normalize_final_letters still runs;
+        dropped keys are recorded in the report."""
+        if not kw:
+            return {}
+        try:
+            sig = inspect.signature(self.factory().main)
+        except Exception:
+            return {}
+        params = sig.parameters
+        if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            return dict(kw)
+        keep = {k: v for k, v in kw.items() if k in params}
+        self._dropped_main_kwargs = sorted(set(kw) - set(keep))
+        return keep
 
     def _fuse(self, subset):
         key = frozenset(subset)
@@ -108,7 +129,7 @@ class EvaluationProtocol:
         order = [n for n in self.voters if n in key]
         ens = self.factory()
         ens.combine_models_transcriptions(*[self.ms[n] for n in order])
-        ens.main(substitute=True)
+        ens.main(**self.main_kwargs)
         si = ens.samples_info
         keep = [p for p in self.paths if p in si and has_ref(si[p]["normalized_prediction"])]
         refs = {p: si[p]["normalized_prediction"] for p in keep}
@@ -306,11 +327,12 @@ class EvaluationProtocol:
             a = self._fuse(self.voters)[0]
             ens = self.factory()
             ens.combine_models_transcriptions(*[self.ms[n] for n in self.voters])
-            ens.main()
+            ens.main(**self.main_kwargs)
             b = {p: v["normalized_prediction"] for p, v in ens.samples_info.items() if p in a}
             same = sum(1 for p in a if a[p] == b.get(p))
             self.report["step3_determinism"] = {"identical_outputs": same, "n": len(a),
-                                                "deterministic": same == len(a)}
+                                                "deterministic": same == len(a),
+                                                "main_kwargs": dict(self.main_kwargs)}
         return df, drop
 
     # ---------- step 4: bootstrap resolution ----------

@@ -8,3 +8,5 @@ reports/
 *.docx
 *.env
 *.parquet
+
+asr-wav2vec2-commonvoice-14-ar/

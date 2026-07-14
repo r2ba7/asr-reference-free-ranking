@@ -1070,11 +1070,12 @@ class HybridEnsemble:
                 
         self._samples_info = dict(sorted(samples_info.items()))
 
-    def eval(self, audios_chunk):
+    def eval(self, audios_chunk, substitute=False, normalize_final_letters=True):
         def fetch_transcript(data):
             llm_t = data.get("llm_transcript")
             return data["fusion_transcript"] if not llm_t or not llm_t.strip() else llm_t
-
+            
+        LOGGER.info(f"Using substitute: {substitute}, Replace Final Char: {normalize_final_letters}")
         refs_lookup = {sample["audio_path"]: sample["normalized_transcription"] for sample in audios_chunk}
         all_audio_paths = list(self._samples_info.keys())
         for i, audio_path in enumerate(all_audio_paths):
@@ -1082,7 +1083,7 @@ class HybridEnsemble:
                 try:
                     ref = refs_lookup.get(audio_path)
                     hyp = fetch_transcript(self._samples_info[audio_path])
-                    self._samples_info[audio_path]["normalized_prediction"] = text_processing.StandardArabicTextProcessor.main(hyp)
+                    self._samples_info[audio_path]["normalized_prediction"] = text_processing.StandardArabicTextProcessor.main(hyp, substitute=substitute, normalize_final_letters=normalize_final_letters)
                     self._samples_info[audio_path]["normalized_transcription"] = ref
                     if ref is not None:
                         norm_hyp = self._samples_info[audio_path]["normalized_prediction"]

@@ -12,10 +12,6 @@ import numpy as np
 from tqdm import tqdm
 from Levenshtein import distance
 import pandas as pd
-from scipy.cluster.hierarchy import linkage, fcluster
-from scipy.spatial.distance import squareform
-from kneed import KneeLocator
-
 
 from stt_benchmarking.utils import text_processing, helpers, metrics
 from stt_benchmarking.models.llms import reinforcer

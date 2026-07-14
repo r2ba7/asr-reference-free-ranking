@@ -2,12 +2,63 @@ import os
 
 import torchaudio
 import pandas as pd
+import soundfile as sf
 
 from stt_benchmarking.utils import text_processing
 from stt_benchmarking.utils.english_normalizer import normalizer
 from . import LOGGER
 
+def load_audio_transcripts_analysis(data_dir, sep, metadata_file_name="metadata.txt", **kwargs):
+    if not os.path.isdir(data_dir):
+        raise FileNotFoundError(f"Directory '{data_dir}' does not exist.")
 
+    metadata_path = os.path.join(data_dir, metadata_file_name)
+    waves_dir = os.path.join(data_dir, "waves")
+
+    if not os.path.isfile(metadata_path):
+        raise FileNotFoundError(f"Metadata file not found at '{metadata_path}'.")
+
+    if not os.path.isdir(waves_dir):
+        raise FileNotFoundError(f"Waves directory not found at '{waves_dir}'.")
+
+    samples = []
+    transcriptions = []
+
+    with open(metadata_path, "r", encoding="utf-8") as f:
+        for line in f:
+            if sep == "|":
+                parts = line.strip().split("|", 1)
+                audio_filename, transcription = parts
+            elif sep == " ":
+                parts = line.strip().split(" ", 1)
+                audio_filename, transcription = parts
+                if "wav" not in audio_filename:
+                    audio_filename = audio_filename + ".wav"
+
+            audio_path = f"{waves_dir}/{audio_filename}"
+            if os.path.exists(audio_path):
+                info = sf.info(audio_path)
+                sample_rate = info.samplerate
+                duration_sec = info.frames / sample_rate
+                samples.append({
+                    "audio_path": audio_path,
+                    "sample_rate": sample_rate,
+                    "transcription": transcription,
+                    "audio_duration": duration_sec
+                })
+                transcriptions.append(transcription)
+            else:
+                print(f"Path {audio_path}, doesn't exist")
+
+    if transcriptions:
+        substitute = kwargs.get("substitute", False)
+        normalize_final_letters = kwargs.get("normalize_final_letters", True)
+        LOGGER.info(f"Using substitute: {substitute}, Replace Final Char: {normalize_final_letters}")
+        normalized_transcriptions = text_processing.StandardArabicTextProcessor.main(texts=transcriptions, normalize_final_letters=normalize_final_letters, substitute=substitute)
+        for i, sample in enumerate(samples):
+            sample["normalized_transcription"] = normalized_transcriptions[i]
+
+    return samples
 
 def load_audio_transcripts(data_dir, sep, metadata_file_name="metadata.txt", **kwargs):
     if not os.path.isdir(data_dir):
@@ -72,6 +123,66 @@ def load_audio_transcripts(data_dir, sep, metadata_file_name="metadata.txt", **k
             sample["normalized_transcription"] = normalized_transcriptions[i]
 
     return samples
+
+
+def load_mozilla_cv_analysis(df, audio_path, **kwargs):
+    required_cols = ["path", "sentence", "age", "gender", "accents", "locale", "segment"]
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise KeyError(f"Missing columns: {missing}")
+
+    paths = df["path"].values
+    sentences = df["sentence"].values
+    ages = df["age"].values
+    genders = df["gender"].values
+    accents = df["accents"].values
+    locales = df["locale"].values
+    segments = df["segment"].values
+
+    full_paths = [os.path.join(audio_path, p) for p in paths]
+    valid_mask = [os.path.exists(p) for p in full_paths]
+    valid_indices = [i for i, valid in enumerate(valid_mask) if valid]
+    if len(valid_indices) < len(full_paths):
+        print(f"Skipped {len(full_paths) - len(valid_indices)} missing files")
+
+    samples = []
+    transcriptions = []
+
+    for idx in valid_indices:
+        full_audio_path = full_paths[idx]
+        transcription = str(sentences[idx]).strip()
+
+        info = sf.info(full_audio_path)
+        sample_rate = info.samplerate
+        duration_sec = info.frames / sample_rate
+
+        samples.append({
+            "audio_path": full_audio_path,
+            "sample_rate": sample_rate,
+            "transcription": transcription,
+            "audio_duration": duration_sec,
+            "age": ages[idx],
+            "gender": genders[idx],
+            "accent": accents[idx],
+            "locale": locales[idx],
+            "segment": segments[idx]
+        })
+        transcriptions.append(transcription)
+
+    if transcriptions:
+        substitute = kwargs.get("substitute", False)
+        normalize_final_letters = kwargs.get("normalize_final_letters", True)
+        LOGGER.info(f"Using substitute: {substitute}, Replace Final Char: {normalize_final_letters}")
+        normalized_transcriptions = text_processing.StandardArabicTextProcessor.main(
+            texts=transcriptions,
+            normalize_final_letters=normalize_final_letters,
+            substitute=substitute
+        )
+        for i, sample in enumerate(samples):
+            sample["normalized_transcription"] = normalized_transcriptions[i]
+
+    return samples
+
 
 def load_mozilla_cv(df, audio_path, **kwargs):
     required_cols = ["path", "sentence", "age", "gender", "accents", "locale", "segment"]
@@ -143,6 +254,54 @@ def load_mozilla_cv(df, audio_path, **kwargs):
             sample["normalized_transcription"] = normalized_transcriptions[i]
     
     return samples
+
+
+def load_librispeech_analysis(data_dir, **kwargs):
+    eng_normalizer = normalizer.EnglishTextNormalizer()
+
+    if not os.path.isdir(data_dir):
+        raise FileNotFoundError(f"Directory '{data_dir}' does not exist.")
+
+    samples = []
+    for speaker_id in os.listdir(data_dir):
+        speaker_path = os.path.join(data_dir, speaker_id)
+        if not os.path.isdir(speaker_path):
+            continue
+
+        for chapter_id in os.listdir(speaker_path):
+            chapter_path = os.path.join(speaker_path, chapter_id)
+            if not os.path.isdir(chapter_path):
+                continue
+
+            trans_path = os.path.join(chapter_path, f"{speaker_id}-{chapter_id}.trans.txt")
+            if not os.path.isfile(trans_path):
+                continue
+
+            with open(trans_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    parts = line.strip().split(" ", 1)
+                    if len(parts) != 2:
+                        continue
+                    utt_id, transcription = parts
+                    audio_file = os.path.join(chapter_path, f"{utt_id}.flac")
+
+                    if not os.path.exists(audio_file):
+                        print(f"Missing audio file: {audio_file}")
+                        continue
+
+                    info = sf.info(audio_file)
+                    sample_rate = info.samplerate
+                    duration_sec = info.frames / sample_rate
+
+                    samples.append({
+                        "audio_path": audio_file,
+                        "sample_rate": sample_rate,
+                        "transcription": transcription,
+                        "audio_duration": duration_sec,
+                        "normalized_transcription": eng_normalizer(transcription)
+                    })
+    return samples
+
 
 def load_librispeech(data_dir, target_sr=16000, **kwargs):
     """

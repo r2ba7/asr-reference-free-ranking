@@ -45,7 +45,8 @@ class CohereArabicInference:
         return model, processor
 
     @decorators.Decorators.calculate_execution_time
-    def run_inference_one_by_one(self, records):
+    def run_inference_one_by_one(self, records, substitute=False, normalize_final_letters=True):
+        LOGGER.info(f"Using substitute: {substitute}, Replace Final Char: {normalize_final_letters}")
         all_audio_paths = []
         if not isinstance(records, list):
             records = [records]
@@ -88,14 +89,14 @@ class CohereArabicInference:
                 "rtf": inference_time / duration if (inference_time and duration > 0) else None,
             }
 
-        self._finalize_info(all_audio_paths=all_audio_paths)
+        self._finalize_info(all_audio_paths=all_audio_paths, substitute=substitute, normalize_final_letters=normalize_final_letters)
 
-    def _finalize_info(self, all_audio_paths):
+    def _finalize_info(self, all_audio_paths, substitute, normalize_final_letters):
         for i, audio_path in enumerate(all_audio_paths):
             if audio_path in self._samples_info:
                 try:
                     prediction = self._samples_info[audio_path]["raw_prediction"]
-                    self._samples_info[audio_path]["normalized_prediction"] = text_processing.StandardArabicTextProcessor.main(prediction, substitute=True)
+                    self._samples_info[audio_path]["normalized_prediction"] = text_processing.StandardArabicTextProcessor.main(prediction, substitute=substitute, normalize_final_letters=normalize_final_letters)
                     sample_metrics = metrics.BasicSTTMetrics.evaluate(
                         refs=self._samples_info[audio_path]["normalized_transcription"],
                         hyps=self._samples_info[audio_path]["normalized_prediction"],

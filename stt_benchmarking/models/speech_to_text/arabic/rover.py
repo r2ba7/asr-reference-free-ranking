@@ -383,19 +383,18 @@ class ROVER:
         
         self._fusion_results = dict(sorted(fusion_results.items()))
     
-    def eval(self, audios_chunk):
+    def eval(self, audios_chunk, substitute=False, normalize_final_letters=True):
         """
         Evaluate fusion results against ground truth.
         """
+        LOGGER.info(f"Using substitute: {substitute}, Replace Final Char: {normalize_final_letters}")
         refs_lookup = {sample["audio_path"]: sample["normalized_transcription"] for sample in audios_chunk}
         for audio_path in list(self._fusion_results.keys()):
             if audio_path in self._fusion_results:
                 try:
                     ref = refs_lookup[audio_path]
                     hyp = self._fusion_results[audio_path]["fusion_transcript"]
-                    norm_hyp = text_processing.StandardArabicTextProcessor.main(
-                        hyp, substitute=True)
-                    
+                    norm_hyp = text_processing.StandardArabicTextProcessor.main(hyp, substitute=substitute, normalize_final_letters=normalize_final_letters)
                     self._fusion_results[audio_path]["normalized_prediction"] = norm_hyp
                     self._fusion_results[audio_path]["normalized_transcription"] = ref
                     

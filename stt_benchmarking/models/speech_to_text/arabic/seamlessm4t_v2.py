@@ -116,7 +116,7 @@ class SeamlessM4TFullInterface:
         return pipe
 
     @decorators.Decorators.calculate_execution_time 
-    def run_inference_one_by_one(self, records):
+    def run_inference_one_by_one(self, records, substitute=False, normalize_final_letters=True):
         """
         Run inference on audio records one by one and compute metrics.
         
@@ -167,10 +167,10 @@ class SeamlessM4TFullInterface:
                 "rtf": inference_time / duration if (inference_time and duration > 0) else None,
             }
 
-        self._finalize_info(all_audio_paths=all_audio_paths)
+        self._finalize_info(all_audio_paths=all_audio_paths, substitute=substitute, normalize_final_letters=normalize_final_letters)
     
     @decorators.Decorators.calculate_execution_time
-    def run_batch_inference(self, records):
+    def run_batch_inference(self, records, substitute=False, normalize_final_letters=True):
         """
         Run batch inference using Hugging Face Dataset for better efficiency.
         Selects best language by evaluating on a sample subset.
@@ -267,10 +267,10 @@ class SeamlessM4TFullInterface:
                 "rtf": sample_rtf,
             }
 
-        self._finalize_info(all_audio_paths=all_audio_paths)
+        self._finalize_info(all_audio_paths=all_audio_paths, substitute=substitute, normalize_final_letters=normalize_final_letters)
 
     @decorators.Decorators.calculate_execution_time
-    def run_inference_optimized(self, records, duration_threshold=30.0):
+    def run_inference_optimized(self, records, substitute=False, normalize_final_letters=True, duration_threshold=30.0):
         """
         Run inference using the best method depending on audio length.
         
@@ -279,6 +279,7 @@ class SeamlessM4TFullInterface:
             language_ids (list): Language IDs to evaluate
             duration_threshold (float): Duration threshold for method selection
         """
+        LOGGER.info(f"Using substitute: {substitute}, Replace Final Char: {normalize_final_letters}")
         if not isinstance(records, list):
             records = [records]
 
@@ -287,17 +288,17 @@ class SeamlessM4TFullInterface:
         
         if short_records:
             LOGGER.info(f"Running one-by-one inference on {len(short_records)} short files (<{duration_threshold}s)")
-            self.run_inference_one_by_one(short_records)
+            self.run_inference_one_by_one(short_records, substitute=substitute, normalize_final_letters=normalize_final_letters)
 
         if long_records:
             LOGGER.info(f"Running batch inference on {len(long_records)} long files (≥{duration_threshold}s)")
-            self.run_batch_inference(long_records)
+            self.run_batch_inference(long_records, substitute=substitute, normalize_final_letters=normalize_final_letters)
 
         refs = [v["normalized_transcription"] for v in self._samples_info.values()]
         hyps = [v["normalized_prediction"] for v in self._samples_info.values()]
         self._overall_metrics = metrics.BasicSTTMetrics.evaluate(refs=refs, hyps=hyps)
 
-    def _finalize_info(self, all_audio_paths):
+    def _finalize_info(self, all_audio_paths, substitute, normalize_final_letters):
         """
         Finalize predictions by normalizing them and computing metrics for each sample.
 
@@ -310,7 +311,7 @@ class SeamlessM4TFullInterface:
             if audio_path in self._samples_info:
                 try:
                     prediction = self._samples_info[audio_path]["raw_prediction"]
-                    self._samples_info[audio_path]["normalized_prediction"] = text_processing.StandardArabicTextProcessor.main(prediction, substitute=True)
+                    self._samples_info[audio_path]["normalized_prediction"] = text_processing.StandardArabicTextProcessor.main(prediction, substitute=substitute, normalize_final_letters=normalize_final_letters)
                     sample_metrics = metrics.BasicSTTMetrics.evaluate(
                         refs=self._samples_info[audio_path]["normalized_transcription"],
                         hyps=self._samples_info[audio_path]["normalized_prediction"],

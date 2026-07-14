@@ -1,0 +1,497 @@
+"""
+Evaluation protocol for reference-free ASR benchmarking via ensemble pseudo-groundtruth.
+
+Single entry point: EvaluationProtocol(...).run()
+
+Steps:
+  0  decorrelation audit        pool uniqueness, measured not assumed
+  1  self-agreement bias        full-pool vs LOO per-sample correlation; ranked-only = control
+  2  system ranking             LOO pseudo-GT vs true GT, exact permutation p
+  3  pipeline diagnostics       filter fire rate (per model), reference strategy mix, tie rate, determinism
+  4  bootstrap resolution       adjacent + all-pair stability, minimum detectable WER gap
+  5  baselines                  single-model / full-ensemble references. Without this, step 2 is uninterpretable.
+  6  pool ablation              per-voter contribution on TWO objectives: reference quality AND ranking fidelity
+  7  floor controls             nonzero-WER subset, tau-b, edit-distance-based correlation
+
+Contract for `ensemble_factory`: zero-arg callable returning an object with
+  .combine_models_transcriptions(*samples_dicts)
+  .main()
+  .samples_info -> {audio_path: {"normalized_prediction": str, "metadata": {...}}}
+
+Contract for `model_samples`: {name: {audio_path: {"normalized_prediction": str,
+  "normalized_transcription": str, "metrics": <BasicSTTMetrics.evaluate output>}}}
+"""
+
+import itertools
+import json
+import os
+from collections import defaultdict
+
+import numpy as np
+import pandas as pd
+from scipy import stats
+
+from . import metrics
+
+# ---------- metric accessors (nested BasicSTTMetrics format) ----------
+
+def wer_pct(m):
+    return m["word_error_rate"]["wer (%)"]
+
+def cer_pct(m):
+    return m["character_error_rate"]["cer (%)"]
+
+def word_counts(m):
+    w = m["word_error_rate"]
+    return w["word_edit_distance"], w["ref_length"]
+
+def char_counts(m):
+    c = m["character_error_rate"]
+    return c["char_edit_distance"], c["ref_length"]
+
+def micro_wer(per_sample, paths):
+    e = sum(word_counts(per_sample[p])[0] for p in paths)
+    n = sum(word_counts(per_sample[p])[1] for p in paths)
+    return 100.0 * e / n if n else float("nan")
+
+def micro_cer(per_sample, paths):
+    e = sum(char_counts(per_sample[p])[0] for p in paths)
+    n = sum(char_counts(per_sample[p])[1] for p in paths)
+    return 100.0 * e / n if n else float("nan")
+
+
+class EvaluationProtocol:
+
+    def __init__(self, model_samples, voters, ensemble_factory,
+                 outdir="protocol_out", n_boot=1000, seed=42,
+                 min_pool_size=3, full_ensemble_samples=None):
+        self.ms = model_samples
+        self.voters = list(voters)
+        self.ranked_only = [n for n in model_samples if n not in self.voters]
+        self.factory = ensemble_factory
+        self.outdir = outdir
+        self.n_boot = n_boot
+        self.rng = np.random.default_rng(seed)
+        self.min_pool_size = min_pool_size
+        os.makedirs(outdir, exist_ok=True)
+        self.paths = sorted(set.intersection(*[set(s.keys()) for s in model_samples.values()]))
+        if not self.paths:
+            raise ValueError("No audio paths common to all models.")
+        self.true_ref = {p: model_samples[self.voters[0]][p]["normalized_transcription"] for p in self.paths}
+        if any(self.true_ref[p] is None for p in self.paths):
+            raise ValueError("Missing ground truth for at least one sample.")
+        self._fusion_cache = {}
+        if full_ensemble_samples is not None:
+            key = frozenset(self.voters)
+            pset = set(self.paths)
+            self._fusion_cache[key] = (
+                {p: v["normalized_prediction"] for p, v in full_ensemble_samples.items() if p in pset},
+                {p: v["metadata"] for p, v in full_ensemble_samples.items() if p in pset},
+                self.voters,
+            )
+        self.report = {}
+        self._score_cache = {}
+
+    # ---------- fusion and scoring, cached ----------
+
+    def _fuse(self, subset):
+        key = frozenset(subset)
+        if key in self._fusion_cache:
+            return self._fusion_cache[key]
+        order = [n for n in self.voters if n in key]
+        ens = self.factory()
+        ens.combine_models_transcriptions(*[self.ms[n] for n in order])
+        ens.main()
+        si = ens.samples_info
+        refs = {p: si[p]["normalized_prediction"] for p in self.paths if p in si}
+        meta = {p: si[p]["metadata"] for p in self.paths if p in si}
+        self._fusion_cache[key] = (refs, meta, order)
+        return self._fusion_cache[key]
+
+    def _score(self, ref_map, name, key=None):
+        """key: hashable identifier of the reference (frozenset of the fused pool,
+        or ('single', model) for single-model references). Enables caching."""
+        ck = (key, name)
+        if key is not None and ck in self._score_cache:
+            return self._score_cache[ck]
+        s = self.ms[name]
+        out = {}
+        for p in self.paths:
+            r = ref_map.get(p)
+            if r is None:
+                continue
+            out[p] = metrics.BasicSTTMetrics.evaluate(refs=r, hyps=s[p]["normalized_prediction"])
+        if key is not None:
+            self._score_cache[ck] = out
+        return out
+
+    def _loo_key(self, name, pool=None):
+        """The voter subset whose fusion serves as `name`'s reference."""
+        pool = self.voters if pool is None else pool
+        sub = [n for n in pool if n != name] if name in pool else list(pool)
+        if len(sub) < self.min_pool_size:
+            raise ValueError(f"LOO pool for {name} has {len(sub)} voters (< {self.min_pool_size}).")
+        return frozenset(sub)
+
+    def _loo_ref(self, name, pool=None):
+        return self._fuse(self._loo_key(name, pool))[0]
+
+    def _loo_score(self, name, pool=None):
+        """Per-sample metrics of `name` against its LOO pseudo-reference. Cached."""
+        key = self._loo_key(name, pool)
+        return self._score(self._fuse(key)[0], name, key=key)
+
+    def _true_per_sample(self, name):
+        return {p: self.ms[name][p]["metrics"] for p in self.paths}
+
+    # ---------- step 0: decorrelation audit ----------
+
+    def step0_decorrelation(self):
+        names = list(self.ms)
+        cw = pd.DataFrame(index=names, columns=names, dtype=float)   # cross-WER: hyp_i vs hyp_j
+        for a, b in itertools.combinations(names, 2):
+            refs = [self.ms[a][p]["normalized_prediction"] for p in self.paths]
+            hyps = [self.ms[b][p]["normalized_prediction"] for p in self.paths]
+            v = wer_pct(metrics.BasicSTTMetrics.evaluate(refs=refs, hyps=hyps))
+            cw.loc[a, b] = v
+            cw.loc[b, a] = v
+        np.fill_diagonal(cw.values, 0.0)
+        errs = {n: np.array([word_counts(self.ms[n][p]["metrics"])[0] for p in self.paths], float) for n in names}
+        ec = pd.DataFrame(index=names, columns=names, dtype=float)
+        for a, b in itertools.combinations(names, 2):
+            v = stats.spearmanr(errs[a], errs[b]).correlation
+            ec.loc[a, b] = v
+            ec.loc[b, a] = v
+        np.fill_diagonal(ec.values, 1.0)
+        off = cw.values[~np.eye(len(names), dtype=bool)]
+        flags = []
+        for a, b in itertools.combinations(names, 2):
+            if cw.loc[a, b] < off.mean() - off.std():
+                flags.append({"pair": f"{a}|{b}", "cross_wer": cw.loc[a, b], "err_corr": ec.loc[a, b],
+                              "note": "unusually similar hypotheses - suspect shared lab/data/teacher"})
+        self.report["step0_cross_wer"] = cw
+        self.report["step0_err_corr"] = ec
+        self.report["step0_flags"] = pd.DataFrame(flags)
+        return cw, ec
+
+    # ---------- step 1: self-agreement bias ----------
+
+    def step1_bias(self):
+        full_key = frozenset(self.voters)
+        full_ref = self._fuse(self.voters)[0]
+        rows = []
+        for name in self.ms:
+            t = np.array([wer_pct(self.ms[name][p]["metrics"]) for p in self.paths], float)
+            fsc = self._score(full_ref, name, key=full_key)
+            f = np.array([wer_pct(fsc[p]) for p in self.paths], float)
+            lsc = self._loo_score(name)
+            l = np.array([wer_pct(lsc[p]) for p in self.paths], float)
+            rows.append({
+                "model": name,
+                "role": "voter" if name in self.voters else "ranked_only(control)",
+                "spearman_full": stats.spearmanr(t, f).correlation,
+                "spearman_loo": stats.spearmanr(t, l).correlation,
+                "kendall_full": stats.kendalltau(t, f, variant="b").correlation,
+                "kendall_loo": stats.kendalltau(t, l, variant="b").correlation,
+            })
+        df = pd.DataFrame(rows)
+        df["delta_spearman"] = df.spearman_loo - df.spearman_full
+        df["delta_kendall"] = df.kendall_loo - df.kendall_full
+        df = df.sort_values("spearman_full").reset_index(drop=True)
+        self.report["step1_bias"] = df
+        return df
+
+    # ---------- step 2: system ranking ----------
+
+    @staticmethod
+    def exact_spearman_p(x, y):
+        rx, ry = stats.rankdata(x), stats.rankdata(y)
+        obs = stats.spearmanr(rx, ry).correlation
+        hits = tot = 0
+        for perm in itertools.permutations(rx):
+            tot += 1
+            if np.corrcoef(perm, ry)[0, 1] >= obs - 1e-12:
+                hits += 1
+        return obs, hits / tot
+
+    def step2_ranking(self, pool=None, store=True):
+        pool = self.voters if pool is None else pool
+        rows = []
+        for name in self.ms:
+            t = self._true_per_sample(name)
+            l = self._loo_score(name, pool)
+            rows.append({
+                "model": name,
+                "role": "voter" if name in pool else "ranked_only",
+                "wer_true": micro_wer(t, self.paths),
+                "cer_true": micro_cer(t, self.paths),
+                "wer_pseudo_loo": micro_wer(l, self.paths),
+                "cer_pseudo_loo": micro_cer(l, self.paths),
+            })
+        df = pd.DataFrame(rows).sort_values("wer_true").reset_index(drop=True)
+        df["rank_true"] = df.wer_true.rank().astype(int)
+        df["rank_pseudo"] = df.wer_pseudo_loo.rank().astype(int)
+        df["wer_compression"] = df.wer_true - df.wer_pseudo_loo
+        sp, sp_p = self.exact_spearman_p(df.wer_true.values, df.wer_pseudo_loo.values)
+        kd = stats.kendalltau(df.wer_true.values, df.wer_pseudo_loo.values, variant="b")
+        pr = stats.pearsonr(df.wer_true.values, df.wer_pseudo_loo.values)
+        stat = {"n_models": len(df), "spearman": sp, "spearman_exact_p_onetailed": sp_p,
+                "kendall_b": kd.correlation, "kendall_p": kd.pvalue,
+                "pearson": pr[0], "pearson_p": pr[1],
+                "mean_wer_compression": float(df.wer_compression.mean())}
+        if store:
+            self.report["step2_ranking"] = df
+            self.report["step2_stats"] = stat
+        return df, stat
+
+    # ---------- step 3: pipeline diagnostics ----------
+
+    def step3_pipeline(self, check_determinism=True):
+        rows = []
+        pooled_filtered = defaultdict(int)
+        pooled_present = defaultdict(int)
+        for name in [None] + self.voters:
+            sub = self.voters if name is None else [v for v in self.voters if v != name]
+            _, meta, order = self._fuse(sub)
+            n = len(meta)
+            fired = ties = pos = 0
+            strat = defaultdict(int)
+            for p, md in meta.items():
+                f = md["records_filtration"]
+                if f.get("num_filtered", 0) > 0:
+                    fired += 1
+                for i in f.get("filtered_indices", []):
+                    pooled_filtered[order[i]] += 1
+                for m in order:
+                    pooled_present[m] += 1
+                strat[md["reference_selection"].get("strategy_metric", "unknown")] += 1
+                for vd in md["voting"]["voting_details"]:
+                    v = vd.get("token_votes") or {}
+                    if v and max(v.values()) <= vd["models_voted"] / 2:
+                        ties += 1
+                    pos += 1
+            rows.append({
+                "run": "full_pool" if name is None else f"LOO_minus_{name}",
+                "n_voters": len(sub), "n_samples": n,
+                "filter_fire_rate": fired / n if n else 0.0,
+                "tie_rate": ties / pos if pos else 0.0,
+                **{f"refsel_{k}": v / n for k, v in strat.items()},
+            })
+        df = pd.DataFrame(rows)
+        drop = pd.DataFrame([
+            {"model": m, "times_filtered_out": pooled_filtered[m],
+             "times_in_pool": pooled_present[m],
+             "filtered_out_rate": pooled_filtered[m] / pooled_present[m] if pooled_present[m] else 0.0}
+            for m in self.voters
+        ]).sort_values("filtered_out_rate", ascending=False)
+        self.report["step3_runs"] = df
+        self.report["step3_model_dropout"] = drop
+        if check_determinism:
+            a = self._fuse(self.voters)[0]
+            ens = self.factory()
+            ens.combine_models_transcriptions(*[self.ms[n] for n in self.voters])
+            ens.main()
+            b = {p: v["normalized_prediction"] for p, v in ens.samples_info.items() if p in a}
+            same = sum(1 for p in a if a[p] == b.get(p))
+            self.report["step3_determinism"] = {"identical_outputs": same, "n": len(a),
+                                                "deterministic": same == len(a)}
+        return df, drop
+
+    # ---------- step 4: bootstrap resolution ----------
+
+    def step4_bootstrap(self, ref="true"):
+        names = list(self.ms)
+        if ref == "true":
+            per = {n: self._true_per_sample(n) for n in names}
+        else:
+            per = {n: self._loo_score(n) for n in names}
+        E = {n: np.array([word_counts(per[n][p])[0] for p in self.paths], float) for n in names}
+        # reference lengths are per-model: pseudo-references differ between models
+        Lm = {n: np.array([word_counts(per[n][p])[1] for p in self.paths], float) for n in names}
+        base = {n: 100.0 * E[n].sum() / Lm[n].sum() for n in names}
+        order = sorted(names, key=base.get)
+        pairs = list(itertools.combinations(order, 2))
+        wins = {pair: 0 for pair in pairs}
+        idx = np.arange(len(self.paths))
+        for _ in range(self.n_boot):
+            s = self.rng.choice(idx, size=len(idx), replace=True)
+            w = {n: E[n][s].sum() / Lm[n][s].sum() for n in names}
+            for a, b in pairs:
+                if w[a] < w[b]:
+                    wins[(a, b)] += 1
+        rows = []
+        for (a, b), c in wins.items():
+            rows.append({"pair": f"{a} < {b}", "adjacent": order.index(b) - order.index(a) == 1,
+                         "gap_wer": base[b] - base[a], "preserved_frac": c / self.n_boot,
+                         "resolved_95": c / self.n_boot >= 0.95})
+        df = pd.DataFrame(rows).sort_values("gap_wer").reset_index(drop=True)
+        res = df[df.resolved_95]
+        mdg = float(res.gap_wer.min()) if len(res) else float("nan")
+        unres_max = float(df[~df.resolved_95].gap_wer.max()) if (~df.resolved_95).any() else 0.0
+        self.report[f"step4_pairs_{ref}"] = df
+        self.report[f"step4_resolution_{ref}"] = {
+            "reference": ref, "n_boot": self.n_boot,
+            "min_resolved_gap_wer": mdg, "max_unresolved_gap_wer": unres_max,
+            "n_resolved": int(df.resolved_95.sum()), "n_pairs": len(df),
+        }
+        return df
+
+    # ---------- step 5: baselines (is the ensemble necessary?) ----------
+
+    def step5_baselines(self):
+        """LOO ensemble vs full ensemble vs each single model as pseudo-reference.
+        Single-model rows are computed on n_models-1 systems (a model cannot be its
+        own reference); Spearman across different n is not strictly comparable, so
+        matched ensemble rows on the same reduced set are reported alongside."""
+        full_key = frozenset(self.voters)
+        full_ref = self._fuse(self.voters)[0]
+
+        def fidelity(names, ref_for, label):
+            rows = []
+            for name in names:
+                rm, key = ref_for(name)
+                sc = self._score(rm, name, key=key)
+                rows.append({"model": name,
+                             "wer_true": micro_wer(self._true_per_sample(name), self.paths),
+                             "wer_pseudo": micro_wer(sc, self.paths)})
+            d = pd.DataFrame(rows)
+            sp, sp_p = self.exact_spearman_p(d.wer_true.values, d.wer_pseudo.values)
+            kd = stats.kendalltau(d.wer_true.values, d.wer_pseudo.values, variant="b")
+            return {"reference": label, "n_models": len(d), "spearman": sp,
+                    "spearman_exact_p": sp_p, "kendall_b": kd.correlation,
+                    "mean_abs_wer_err": float((d.wer_true - d.wer_pseudo).abs().mean())}
+
+        all_names = list(self.ms)
+        out = [
+            fidelity(all_names, lambda n: (self._fuse(self._loo_key(n))[0], self._loo_key(n)),
+                     "LOO ensemble (proposed)"),
+            fidelity(all_names, lambda n: (full_ref, full_key),
+                     "full ensemble (biased)"),
+        ]
+        for m in self.voters:
+            reduced = [n for n in all_names if n != m]
+            sref = {p: self.ms[m][p]["normalized_prediction"] for p in self.paths}
+            skey = ("single", m)
+            out.append(fidelity(reduced, lambda n, sref=sref, skey=skey: (sref, skey),
+                                f"single model: {m}"))
+            out.append(fidelity(reduced, lambda n: (self._fuse(self._loo_key(n))[0], self._loo_key(n)),
+                                f"LOO ensemble matched to n-1 (vs {m})"))
+        df = pd.DataFrame(out)
+        self.report["step5_baselines"] = df
+        return df
+
+    # ---------- step 6: pool ablation, two objectives ----------
+
+    def step6_ablation(self, max_subsets=None):
+        """
+        For every voter subset (>= min_pool_size), report:
+          obj_A ensemble_wer_vs_true   -> reference quality (what 'toxic model' removal optimizes)
+          obj_B ranking_spearman       -> the actual thesis claim
+        These can disagree. Report both; do not select on obj_A alone.
+        obj_B is nan for pools whose LOO sub-pools fall below min_pool_size.
+        """
+        subs = [s for k in range(self.min_pool_size, len(self.voters) + 1)
+                for s in itertools.combinations(self.voters, k)]
+        if max_subsets:
+            subs = subs[:max_subsets]
+        rows = []
+        for sub in subs:
+            sub = list(sub)
+            refs = self._fuse(sub)[0]
+            ens_m = {p: metrics.BasicSTTMetrics.evaluate(refs=self.true_ref[p], hyps=refs[p])
+                     for p in self.paths if p in refs}
+            objA = micro_wer(ens_m, list(ens_m))
+            objA_cer = micro_cer(ens_m, list(ens_m))
+            try:
+                _, st = self.step2_ranking(pool=sub, store=False)
+                objB, objB_p = st["spearman"], st["spearman_exact_p_onetailed"]
+            except ValueError:
+                objB, objB_p = float("nan"), float("nan")
+            rows.append({"pool": "+".join(sub), "k": len(sub),
+                         "ensemble_wer_vs_true": objA, "ensemble_cer_vs_true": objA_cer,
+                         "ranking_spearman": objB, "ranking_exact_p": objB_p})
+        df = pd.DataFrame(rows)
+        full = df[df.k == len(self.voters)].iloc[0]
+        contrib = []
+        for m in self.voters:
+            row = df[df.pool == "+".join([v for v in self.voters if v != m])]
+            if len(row):
+                r = row.iloc[0]
+                contrib.append({
+                    "model_removed": m,
+                    "delta_ensemble_wer": r.ensemble_wer_vs_true - full.ensemble_wer_vs_true,
+                    "delta_ranking_spearman": r.ranking_spearman - full.ranking_spearman,
+                    "helps_reference_quality": r.ensemble_wer_vs_true > full.ensemble_wer_vs_true,
+                    "helps_ranking": bool(r.ranking_spearman >= full.ranking_spearman)
+                                     if not np.isnan(r.ranking_spearman) else None,
+                })
+        self.report["step6_pools"] = df.sort_values("ensemble_wer_vs_true").reset_index(drop=True)
+        self.report["step6_contribution"] = pd.DataFrame(contrib)
+        return df
+
+    # ---------- step 7: floor-effect controls ----------
+
+    def step7_floor(self):
+        rows = []
+        for name in self.ms:
+            t = self._true_per_sample(name)
+            l = self._loo_score(name)
+            tw = np.array([wer_pct(t[p]) for p in self.paths], float)
+            lw = np.array([wer_pct(l[p]) for p in self.paths], float)
+            te = np.array([word_counts(t[p])[0] for p in self.paths], float)
+            le = np.array([word_counts(l[p])[0] for p in self.paths], float)
+            nz = tw > 0
+            rows.append({
+                "model": name,
+                "frac_zero_wer_samples": float((~nz).mean()),
+                "kendall_b_all": stats.kendalltau(tw, lw, variant="b").correlation,
+                "kendall_b_nonzero": stats.kendalltau(tw[nz], lw[nz], variant="b").correlation if nz.sum() > 2 else np.nan,
+                "n_nonzero": int(nz.sum()),
+                "kendall_b_editdist": stats.kendalltau(te, le, variant="b").correlation,
+            })
+        df = pd.DataFrame(rows).sort_values("frac_zero_wer_samples", ascending=False).reset_index(drop=True)
+        self.report["step7_floor"] = df
+        return df
+
+    # ---------- driver ----------
+
+    def run(self, steps=(0, 1, 2, 3, 4, 5, 6, 7), ablation_cap=None):
+        if 0 in steps: self.step0_decorrelation()
+        if 1 in steps: self.step1_bias()
+        if 2 in steps: self.step2_ranking()
+        if 3 in steps: self.step3_pipeline()
+        if 4 in steps:
+            self.step4_bootstrap(ref="true")
+            self.step4_bootstrap(ref="pseudo")
+        if 5 in steps: self.step5_baselines()
+        if 6 in steps: self.step6_ablation(max_subsets=ablation_cap)
+        if 7 in steps: self.step7_floor()
+        self._dump()
+        self._print()
+        return self.report
+
+    def _dump(self):
+        scalars = {}
+        for k, v in self.report.items():
+            if isinstance(v, pd.DataFrame):
+                keep_index = k in ("step0_cross_wer", "step0_err_corr")
+                v.to_csv(os.path.join(self.outdir, f"{k}.csv"), index=keep_index)
+            else:
+                scalars[k] = v
+        with open(os.path.join(self.outdir, "scalars.json"), "w") as f:
+            json.dump(scalars, f, indent=2, default=float)
+
+    def _print(self):
+        for k, v in self.report.items():
+            print(f"\n=== {k} ===")
+            if isinstance(v, pd.DataFrame):
+                print(v.round(4).to_string())
+            else:
+                print(json.dumps(v, indent=2, default=float))
+
+
+def run_protocol(model_samples, voters, ensemble_factory, steps=(0, 1, 2, 3, 4, 5, 6, 7),
+                 ablation_cap=None, **kw):
+    """Single entry point."""
+    return EvaluationProtocol(model_samples, voters, ensemble_factory, **kw).run(
+        steps=steps, ablation_cap=ablation_cap)

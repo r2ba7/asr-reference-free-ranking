@@ -42,7 +42,7 @@ class FastConformerInference:
         return model
     
     @decorators.Decorators.calculate_execution_time
-    def run_inference_one_by_one(self, records):
+    def run_inference_one_by_one(self, records, substitute=False, normalize_final_letters=True):
         """
         Run inference on audio records one by one and compute metrics.
         
@@ -50,6 +50,7 @@ class FastConformerInference:
             records (list): List of audio records containing waveform, sample_rate, 
                           transcription, and audio_path
         """
+        LOGGER.info(f"Using substitute: {substitute}, Replace Final Char: {normalize_final_letters}")
         all_audio_paths = []
         if not isinstance(records, list): records = [records]
         for i, record in tqdm(enumerate(records), total=len(records), desc="Processing Records"):
@@ -85,9 +86,9 @@ class FastConformerInference:
                 "rtf": inference_time / duration if (inference_time and duration > 0) else None,
             }
                 
-        self._finalize_info(all_audio_paths=all_audio_paths)
+        self._finalize_info(all_audio_paths=all_audio_paths, substitute=substitute, normalize_final_letters=normalize_final_letters)
         
-    def _finalize_info(self, all_audio_paths):
+    def _finalize_info(self, all_audio_paths, substitute, normalize_final_letters):
         """
         Finalize predictions by normalizing them and computing metrics for each sample.
 
@@ -100,7 +101,7 @@ class FastConformerInference:
             if audio_path in self._samples_info:
                 try:
                     prediction = self._samples_info[audio_path]["raw_prediction"]
-                    self._samples_info[audio_path]["normalized_prediction"] = text_processing.StandardArabicTextProcessor.main(prediction, substitute=True)
+                    self._samples_info[audio_path]["normalized_prediction"] = text_processing.StandardArabicTextProcessor.main(prediction, substitute=substitute, normalize_final_letters=normalize_final_letters)
                     sample_metrics = metrics.BasicSTTMetrics.evaluate(
                         refs=self._samples_info[audio_path]["normalized_transcription"],
                         hyps=self._samples_info[audio_path]["normalized_prediction"],

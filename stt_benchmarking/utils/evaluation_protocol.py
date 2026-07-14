@@ -59,6 +59,8 @@ def micro_cer(per_sample, paths):
     n = sum(char_counts(per_sample[p])[1] for p in paths)
     return 100.0 * e / n if n else float("nan")
 
+def has_ref(s):
+    return isinstance(s, str) and s.strip() != ""
 
 class EvaluationProtocol:
 
@@ -74,23 +76,28 @@ class EvaluationProtocol:
         self.rng = np.random.default_rng(seed)
         self.min_pool_size = min_pool_size
         os.makedirs(outdir, exist_ok=True)
-        self.paths = sorted(set.intersection(*[set(s.keys()) for s in model_samples.values()]))
-        if not self.paths:
+        common = sorted(set.intersection(*[set(s.keys()) for s in model_samples.values()]))
+        if not common:
             raise ValueError("No audio paths common to all models.")
-        self.true_ref = {p: model_samples[self.voters[0]][p]["normalized_transcription"] for p in self.paths}
-        if any(self.true_ref[p] is None for p in self.paths):
-            raise ValueError("Missing ground truth for at least one sample.")
+        gt = {p: model_samples[self.voters[0]][p]["normalized_transcription"] for p in common}
+        self.paths = [p for p in common if has_ref(gt[p])]
+        self.skipped_empty_gt = [p for p in common if not has_ref(gt[p])]
+        if not self.paths:
+            raise ValueError("Every sample has an empty ground-truth reference.")
+        self.true_ref = {p: gt[p] for p in self.paths}
         self._fusion_cache = {}
         if full_ensemble_samples is not None:
             key = frozenset(self.voters)
             pset = set(self.paths)
+            keep = [p for p, v in full_ensemble_samples.items()
+                    if p in pset and has_ref(v["normalized_prediction"])]
             self._fusion_cache[key] = (
-                {p: v["normalized_prediction"] for p, v in full_ensemble_samples.items() if p in pset},
-                {p: v["metadata"] for p, v in full_ensemble_samples.items() if p in pset},
+                {p: full_ensemble_samples[p]["normalized_prediction"] for p in keep},
+                {p: full_ensemble_samples[p]["metadata"] for p in keep},
                 self.voters,
             )
-        self.report = {}
-        self._score_cache = {}
+        self.report = {"skipped_empty_gt": len(self.skipped_empty_gt)}
+        self._score_cache = {}  
 
     # ---------- fusion and scoring, cached ----------
 
@@ -101,10 +108,11 @@ class EvaluationProtocol:
         order = [n for n in self.voters if n in key]
         ens = self.factory()
         ens.combine_models_transcriptions(*[self.ms[n] for n in order])
-        ens.main()
+        ens.main(substitute=True)
         si = ens.samples_info
-        refs = {p: si[p]["normalized_prediction"] for p in self.paths if p in si}
-        meta = {p: si[p]["metadata"] for p in self.paths if p in si}
+        keep = [p for p in self.paths if p in si and has_ref(si[p]["normalized_prediction"])]
+        refs = {p: si[p]["normalized_prediction"] for p in keep}
+        meta = {p: si[p]["metadata"] for p in keep}
         self._fusion_cache[key] = (refs, meta, order)
         return self._fusion_cache[key]
 
@@ -118,7 +126,7 @@ class EvaluationProtocol:
         out = {}
         for p in self.paths:
             r = ref_map.get(p)
-            if r is None:
+            if not has_ref(r):
                 continue
             out[p] = metrics.BasicSTTMetrics.evaluate(refs=r, hyps=s[p]["normalized_prediction"])
         if key is not None:
@@ -150,9 +158,13 @@ class EvaluationProtocol:
         names = list(self.ms)
         cw = pd.DataFrame(index=names, columns=names, dtype=float)   # cross-WER: hyp_i vs hyp_j
         for a, b in itertools.combinations(names, 2):
-            refs = [self.ms[a][p]["normalized_prediction"] for p in self.paths]
-            hyps = [self.ms[b][p]["normalized_prediction"] for p in self.paths]
-            v = wer_pct(metrics.BasicSTTMetrics.evaluate(refs=refs, hyps=hyps))
+            ps = [p for p in self.paths if has_ref(self.ms[a][p]["normalized_prediction"])]
+            if not ps:
+                v = float("nan")
+            else:
+                refs = [self.ms[a][p]["normalized_prediction"] for p in ps]
+                hyps = [self.ms[b][p]["normalized_prediction"] for p in ps]
+                v = wer_pct(metrics.BasicSTTMetrics.evaluate(refs=refs, hyps=hyps))
             cw.loc[a, b] = v
             cw.loc[b, a] = v
         np.fill_diagonal(cw.values, 0.0)
@@ -181,14 +193,16 @@ class EvaluationProtocol:
         full_ref = self._fuse(self.voters)[0]
         rows = []
         for name in self.ms:
-            t = np.array([wer_pct(self.ms[name][p]["metrics"]) for p in self.paths], float)
             fsc = self._score(full_ref, name, key=full_key)
-            f = np.array([wer_pct(fsc[p]) for p in self.paths], float)
             lsc = self._loo_score(name)
-            l = np.array([wer_pct(lsc[p]) for p in self.paths], float)
+            ps = [p for p in self.paths if p in fsc and p in lsc]
+            t = np.array([wer_pct(self.ms[name][p]["metrics"]) for p in ps], float)
+            f = np.array([wer_pct(fsc[p]) for p in ps], float)
+            l = np.array([wer_pct(lsc[p]) for p in ps], float)
             rows.append({
                 "model": name,
                 "role": "voter" if name in self.voters else "ranked_only(control)",
+                "n_samples": len(ps),
                 "spearman_full": stats.spearmanr(t, f).correlation,
                 "spearman_loo": stats.spearmanr(t, l).correlation,
                 "kendall_full": stats.kendalltau(t, f, variant="b").correlation,
@@ -220,13 +234,15 @@ class EvaluationProtocol:
         for name in self.ms:
             t = self._true_per_sample(name)
             l = self._loo_score(name, pool)
+            ps = [p for p in self.paths if p in l]
             rows.append({
                 "model": name,
                 "role": "voter" if name in pool else "ranked_only",
-                "wer_true": micro_wer(t, self.paths),
-                "cer_true": micro_cer(t, self.paths),
-                "wer_pseudo_loo": micro_wer(l, self.paths),
-                "cer_pseudo_loo": micro_cer(l, self.paths),
+                "n_samples": len(ps),
+                "wer_true": micro_wer(t, ps),
+                "cer_true": micro_cer(t, ps),
+                "wer_pseudo_loo": micro_wer(l, ps),
+                "cer_pseudo_loo": micro_cer(l, ps),
             })
         df = pd.DataFrame(rows).sort_values("wer_true").reset_index(drop=True)
         df["rank_true"] = df.wer_true.rank().astype(int)
@@ -305,14 +321,15 @@ class EvaluationProtocol:
             per = {n: self._true_per_sample(n) for n in names}
         else:
             per = {n: self._loo_score(n) for n in names}
-        E = {n: np.array([word_counts(per[n][p])[0] for p in self.paths], float) for n in names}
+        cp = [p for p in self.paths if all(p in per[n] for n in names)]
+        E = {n: np.array([word_counts(per[n][p])[0] for p in cp], float) for n in names}
         # reference lengths are per-model: pseudo-references differ between models
-        Lm = {n: np.array([word_counts(per[n][p])[1] for p in self.paths], float) for n in names}
+        Lm = {n: np.array([word_counts(per[n][p])[1] for p in cp], float) for n in names}
         base = {n: 100.0 * E[n].sum() / Lm[n].sum() for n in names}
         order = sorted(names, key=base.get)
         pairs = list(itertools.combinations(order, 2))
         wins = {pair: 0 for pair in pairs}
-        idx = np.arange(len(self.paths))
+        idx = np.arange(len(cp))
         for _ in range(self.n_boot):
             s = self.rng.choice(idx, size=len(idx), replace=True)
             w = {n: E[n][s].sum() / Lm[n][s].sum() for n in names}
@@ -330,7 +347,7 @@ class EvaluationProtocol:
         unres_max = float(df[~df.resolved_95].gap_wer.max()) if (~df.resolved_95).any() else 0.0
         self.report[f"step4_pairs_{ref}"] = df
         self.report[f"step4_resolution_{ref}"] = {
-            "reference": ref, "n_boot": self.n_boot,
+            "reference": ref, "n_boot": self.n_boot, "n_samples": len(cp),
             "min_resolved_gap_wer": mdg, "max_unresolved_gap_wer": unres_max,
             "n_resolved": int(df.resolved_95.sum()), "n_pairs": len(df),
         }
@@ -351,9 +368,10 @@ class EvaluationProtocol:
             for name in names:
                 rm, key = ref_for(name)
                 sc = self._score(rm, name, key=key)
-                rows.append({"model": name,
-                             "wer_true": micro_wer(self._true_per_sample(name), self.paths),
-                             "wer_pseudo": micro_wer(sc, self.paths)})
+                ps = [p for p in self.paths if p in sc]
+                rows.append({"model": name, "n_samples": len(ps),
+                             "wer_true": micro_wer(self._true_per_sample(name), ps),
+                             "wer_pseudo": micro_wer(sc, ps)})
             d = pd.DataFrame(rows)
             sp, sp_p = self.exact_spearman_p(d.wer_true.values, d.wer_pseudo.values)
             kd = stats.kendalltau(d.wer_true.values, d.wer_pseudo.values, variant="b")
@@ -436,10 +454,11 @@ class EvaluationProtocol:
         for name in self.ms:
             t = self._true_per_sample(name)
             l = self._loo_score(name)
-            tw = np.array([wer_pct(t[p]) for p in self.paths], float)
-            lw = np.array([wer_pct(l[p]) for p in self.paths], float)
-            te = np.array([word_counts(t[p])[0] for p in self.paths], float)
-            le = np.array([word_counts(l[p])[0] for p in self.paths], float)
+            ps = [p for p in self.paths if p in l]
+            tw = np.array([wer_pct(t[p]) for p in ps], float)
+            lw = np.array([wer_pct(l[p]) for p in ps], float)
+            te = np.array([word_counts(t[p])[0] for p in ps], float)
+            le = np.array([word_counts(l[p])[0] for p in ps], float)
             nz = tw > 0
             rows.append({
                 "model": name,

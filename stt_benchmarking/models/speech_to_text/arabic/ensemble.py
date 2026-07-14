@@ -1019,7 +1019,7 @@ class HybridEnsemble:
         self._input_to_fusion = combined
 
     def main(self, filter_params={"mode": "mean"}, reference_params={"lengthmode": "iqr", "matchmode": "mean"}, 
-             reinforcer_params={"use_llm": False, "max_tokens":25, "chunk_size":15, "overlap":3}):
+             reinforcer_params={"use_llm": False, "max_tokens":25, "chunk_size":15, "overlap":3}, substitute=False, normalize_final_letters=True):
         def fuse_sample_transcriptions(audio_path, transcriptions):
             transcriptions_copy = list(transcriptions)
             fusion_start = time.time()
@@ -1031,10 +1031,13 @@ class HybridEnsemble:
             fusion_transcript, voting_metadata = TokenLevelVoting().main(alignment_results)
             llm_transcript, llm_metadata = VotingReinforcer(**reinforcer_params).main(fusion_tokens=voting_metadata["fusion_tokens"],
                                                                                       candidates_tokens=voting_metadata["candidates_tokens"])
+            to_be_normalized = fusion_transcript if not llm_transcript or not llm_transcript.strip() else llm_transcript
+            normalized_prediction = text_processing.StandardArabicTextProcessor.main(to_be_normalized, substitute=substitute, normalize_final_letters=normalize_final_letters)
             data = {
                 # --- Primary Outputs ---
                 "fusion_transcript": fusion_transcript,
                 "llm_transcript": llm_transcript,
+                "normalized_prediction": normalized_prediction,
                 # --- Diagnostic/Internal Data ---
                 "fusion_time": time.time() - fusion_start,
                 # --- Aggregated Metadata ---
@@ -1054,6 +1057,7 @@ class HybridEnsemble:
             voting_result = fuse_sample_transcriptions(key, value)
             return voting_result
         
+        LOGGER.info(f"Using substitute: {substitute}, Replace Final Char: {normalize_final_letters}")
         if not self._input_to_fusion:
             raise ValueError("Run EnsembleInference.combine_models_transcriptions first.")
 
@@ -1070,20 +1074,17 @@ class HybridEnsemble:
                 
         self._samples_info = dict(sorted(samples_info.items()))
 
-    def eval(self, audios_chunk, substitute=False, normalize_final_letters=True):
+    def eval(self, audios_chunk):
         def fetch_transcript(data):
             llm_t = data.get("llm_transcript")
             return data["fusion_transcript"] if not llm_t or not llm_t.strip() else llm_t
             
-        LOGGER.info(f"Using substitute: {substitute}, Replace Final Char: {normalize_final_letters}")
         refs_lookup = {sample["audio_path"]: sample["normalized_transcription"] for sample in audios_chunk}
         all_audio_paths = list(self._samples_info.keys())
         for i, audio_path in enumerate(all_audio_paths):
             if audio_path in self._samples_info:
                 try:
                     ref = refs_lookup.get(audio_path)
-                    hyp = fetch_transcript(self._samples_info[audio_path])
-                    self._samples_info[audio_path]["normalized_prediction"] = text_processing.StandardArabicTextProcessor.main(hyp, substitute=substitute, normalize_final_letters=normalize_final_letters)
                     self._samples_info[audio_path]["normalized_transcription"] = ref
                     if ref is not None:
                         norm_hyp = self._samples_info[audio_path]["normalized_prediction"]

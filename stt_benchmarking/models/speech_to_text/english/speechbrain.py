@@ -4,7 +4,10 @@ import time
 import torch
 import torchaudio
 from tqdm import tqdm
-from speechbrain.inference.ASR import EncoderDecoderASR
+try:
+    from speechbrain.inference.ASR import EncoderDecoderASR  # speechbrain >= 1.0
+except ImportError:
+    from speechbrain.pretrained import EncoderDecoderASR  # speechbrain 0.5.x
 
 from . import LOGGER, NORMALIZER_OBJ
 from stt_benchmarking.utils import (

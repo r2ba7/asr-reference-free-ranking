@@ -16,10 +16,8 @@ dependencies = [
     "torchvision==0.24.0",
     # Local wheel, resolved through [tool.uv.sources] below
     "RDIreplacement",
-    "transformers==4.57.1",
     "datasets==3.6.0",
     "accelerate==1.9.0",
-    "huggingface_hub==0.36.2",
     "numpy==1.26.4",
     "pandas==1.5.3",
     "scipy==1.15.3",
@@ -29,12 +27,9 @@ dependencies = [
     "python-docx",
     "Levenshtein==0.27.1",
     "soundfile==0.13.1",
-    "librosa==0.10.0",
-    "nemo-toolkit==2.3.2",
-    "faster-whisper==1.2.0",
+    "librosa>=0.10.1,<0.11",  # NeMo [asr] needs >= 0.10.1
     "editdistance==0.8.1",
     "jiwer==3.1.0",
-    "speechbrain==0.5.16",
     "openai==1.102.0",
     "pydantic==2.11.7",
     "praw==7.8.1",
@@ -62,6 +57,40 @@ dev = [
     "ipykernel==6.29.5",
     "ipywidgets==8.1.7",
     "nbconvert==7.17.1",
+]
+# Everything except the Cohere models. NeMo 2.3.2 caps transformers at 4.52.0,
+# so this group and "cohere" cannot be installed together (see [tool.uv] conflicts).
+main = [
+    "transformers>=4.51.0,<=4.52.0",  # NeMo 2.3.2 range; 4.52.0 itself is yanked
+    "nemo-toolkit[asr]==2.3.2",
+    "speechbrain==1.1.0",  # the commonvoice-14-ar hparams need the 1.x module layout
+    "faster-whisper==1.2.0",
+    # hyperpyyaml (used by speechbrain) breaks with ruamel.yaml >= 0.19
+    "ruamel.yaml==0.18.15",
+]
+# Cohere Transcribe models: CohereAsrForConditionalGeneration needs transformers >= 5.4.
+cohere = [
+    "transformers>=5.4.0",
+    "huggingface_hub>=1.0",
+]
+
+# hubert-large-arabic-transcribe ships a speechbrain 0.5.x hyperparams.yaml
+# (speechbrain.lobes.models.huggingface_wav2vec.HuggingFaceWav2Vec2), which was
+# renamed in speechbrain 1.x. NeMo is not needed here.
+hubert = [
+    "transformers==4.57.1",
+    "speechbrain==0.5.16",
+    "ruamel.yaml==0.18.15",
+]
+
+[tool.uv]
+default-groups = ["dev", "main"]
+conflicts = [
+    [
+        { group = "main" },
+        { group = "cohere" },
+        { group = "hubert" },
+    ],
 ]
 
 [[tool.uv.index]]

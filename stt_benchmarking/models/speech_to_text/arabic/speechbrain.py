@@ -2,7 +2,10 @@ import gc
 import time
 import torch
 from tqdm import tqdm
-from speechbrain.inference.ASR import EncoderASR
+try:
+    from speechbrain.inference.ASR import EncoderASR  # speechbrain >= 1.0
+except ImportError:
+    from speechbrain.pretrained import EncoderASR  # speechbrain 0.5.x
 from .. import LOGGER
 from stt_benchmarking.utils import (
     text_processing,

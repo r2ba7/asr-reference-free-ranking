@@ -1,0 +1,8 @@
+model_removed,delta_ensemble_wer,delta_ranking_spearman,helps_reference_quality,helps_ranking,delta_pairs_wrong,delta_pairs_wrong_resolvable
+seamless_m4t,0.24987318466191955,0.0,True,True,0.0,0.0
+whisper_v3,-0.16720837169105973,0.0,False,True,0.0,0.0
+fastconformer,0.5071614640956206,0.0,True,True,0.0,0.0
+w2vbert,-0.08642230446953647,0.0,False,True,0.0,0.0
+hubert,0.6988934187536398,0.0,True,True,0.0,0.0
+wav2vec_sb,-0.12211847370695406,0.0,False,True,0.0,0.0
+cohere,0.9035693697092073,0.0,True,True,0.0,0.0

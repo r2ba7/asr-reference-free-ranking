@@ -1,0 +1,11 @@
+pair,cross_wer,err_corr,note
+seamless_m4t|whisper_v3,29.39,0.8005737890497169,unusually similar hypotheses - suspect shared lab/data/teacher
+seamless_m4t|whisper_v2,31.86,0.7832758661614675,unusually similar hypotheses - suspect shared lab/data/teacher
+seamless_m4t|fastconformer,29.99,0.8142238093327042,unusually similar hypotheses - suspect shared lab/data/teacher
+seamless_m4t|cohere,26.72,0.7823208144580536,unusually similar hypotheses - suspect shared lab/data/teacher
+whisper_v3|whisper_v2,21.85,0.8611481940464656,unusually similar hypotheses - suspect shared lab/data/teacher
+whisper_v3|fastconformer,26.04,0.8286209095084572,unusually similar hypotheses - suspect shared lab/data/teacher
+whisper_v3|cohere,24.1,0.7771017632618997,unusually similar hypotheses - suspect shared lab/data/teacher
+whisper_v2|fastconformer,28.73,0.8089345259773909,unusually similar hypotheses - suspect shared lab/data/teacher
+whisper_v2|cohere,27.04,0.7473915564970176,unusually similar hypotheses - suspect shared lab/data/teacher
+fastconformer|cohere,24.25,0.7804475352034936,unusually similar hypotheses - suspect shared lab/data/teacher

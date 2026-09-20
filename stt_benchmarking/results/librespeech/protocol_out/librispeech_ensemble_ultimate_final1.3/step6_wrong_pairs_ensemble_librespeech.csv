@@ -1,0 +1,3 @@
+pool,k,pair,true_winner,pred_winner,wer_true_a,wer_true_b,wer_pseudo_a,wer_pseudo_b,gap_wer_true,gap_wer_pseudo,human_resolvable
+seamless_m4t+whisper_v3+sb+cohere,4,cohere|parakeet,cohere,parakeet,1.2244742019904868,1.6676536323520985,1.2415479237498568,1.15344218466533,0.44317943036161167,0.08810573908452679,True
+seamless_m4t+whisper_v3+sb+cohere,4,canary|conformer,canary,conformer,1.891153603698256,2.032512559934287,1.413157643464146,1.4074286259906426,0.14135895623603112,0.005729017473503406,True

@@ -1,0 +1,30 @@
+{
+  "n_samples": 3282,
+  "main_kwargs_applied": {
+    "substitute": true,
+    "normalize_final_letters": true
+  },
+  "timings_seconds": {
+    "cross_wer": 9.0,
+    "ranking": 262.0,
+    "model_filtration": 4444.5,
+    "rank_distribution": 5245.2
+  },
+  "ranking_stats": {
+    "n_models": 9,
+    "pool": "seamless_m4t+whisper_v3+whisper_v2+fastconformer+xlsr+w2vbert+hubert+wav2vec_sb+cohere"
+  },
+  "rank_distribution_summary": {
+    "n_subpools": 382,
+    "n_boot_inner": 1000,
+    "n_fusions": 466,
+    "n_scorings": 1971,
+    "seconds_fuse_and_score": 770.4,
+    "seconds_bootstrap": 30.2,
+    "weighting": "filtration",
+    "exponent": 1.0,
+    "mean_entropy": 0.38258591809101616,
+    "max_entropy": 0.7105908685625733,
+    "n_models_modal_differs_from_full": 1
+  }
+}

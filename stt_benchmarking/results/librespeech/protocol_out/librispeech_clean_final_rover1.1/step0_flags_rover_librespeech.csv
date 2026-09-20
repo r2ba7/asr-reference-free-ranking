@@ -1,0 +1,6 @@
+pair,cross_wer,err_corr,note
+canary|parakeet,1.27,0.7443548483297314,unusually similar hypotheses - suspect shared lab/data/teacher
+canary|cohere,1.54,0.5841549319587188,unusually similar hypotheses - suspect shared lab/data/teacher
+conformer|parakeet,1.6,0.6946808253427266,unusually similar hypotheses - suspect shared lab/data/teacher
+conformer|cohere,1.6,0.6100183024354412,unusually similar hypotheses - suspect shared lab/data/teacher
+parakeet|cohere,1.29,0.6281856362488343,unusually similar hypotheses - suspect shared lab/data/teacher

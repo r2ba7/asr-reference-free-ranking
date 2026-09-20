@@ -1,0 +1,8 @@
+pair,cross_wer,err_corr,note
+seamless_m4t|fastconformer,11.85,0.4468441397578092,unusually similar hypotheses - suspect shared lab/data/teacher
+seamless_m4t|hubert,13.86,0.35273881431254733,unusually similar hypotheses - suspect shared lab/data/teacher
+seamless_m4t|cohere,10.23,0.48638044726437696,unusually similar hypotheses - suspect shared lab/data/teacher
+whisper_v3|cohere,13.88,0.44423100474940147,unusually similar hypotheses - suspect shared lab/data/teacher
+fastconformer|hubert,10.3,0.4154567131884953,unusually similar hypotheses - suspect shared lab/data/teacher
+fastconformer|cohere,7.05,0.5510743568170464,unusually similar hypotheses - suspect shared lab/data/teacher
+hubert|cohere,9.23,0.3997087952735907,unusually similar hypotheses - suspect shared lab/data/teacher

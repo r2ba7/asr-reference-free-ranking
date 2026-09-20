@@ -1,0 +1,6 @@
+,seamless_m4t,whisper_v3,parakeet,sb,cohere
+seamless_m4t,0.0,2.84,2.14,2.56,2.14
+whisper_v3,2.84,0.0,2.22,2.81,2.16
+parakeet,2.14,2.22,0.0,1.88,1.29
+sb,2.56,2.81,1.88,0.0,1.74
+cohere,2.14,2.16,1.29,1.74,0.0

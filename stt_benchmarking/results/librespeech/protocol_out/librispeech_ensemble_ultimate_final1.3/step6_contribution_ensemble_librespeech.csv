@@ -1,0 +1,6 @@
+model_removed,delta_ensemble_wer,delta_ranking_spearman,helps_reference_quality,helps_ranking,delta_pairs_wrong,delta_pairs_wrong_resolvable
+seamless_m4t,-0.04775640413379434,0.0,False,True,0.0,0.0
+whisper_v3,0.0,0.0,False,True,0.0,0.0
+parakeet,0.08214101511012628,-0.07142857142857117,True,False,2.0,2.0
+sb,0.030564098645628368,0.0,True,True,0.0,0.0
+cohere,0.1852948480391221,0.0,True,True,0.0,0.0

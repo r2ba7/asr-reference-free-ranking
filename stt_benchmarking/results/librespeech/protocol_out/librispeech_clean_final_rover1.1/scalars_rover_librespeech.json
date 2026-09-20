@@ -1,0 +1,42 @@
+{
+  "skipped_empty_gt": 0,
+  "main_kwargs_applied": {},
+  "main_kwargs_dropped": [],
+  "step2_stats": {
+    "n_models": 7,
+    "spearman": 1.0,
+    "kendall_b": 1.0,
+    "spearman_exact_p_onetailed": 0.0001984126984126984,
+    "kendall_exact_p_onetailed": 0.0001984126984126984,
+    "p_method": "exact",
+    "n_permutations": 5040,
+    "min_attainable_p": 0.0001984126984126984,
+    "pearson": 0.9395291415419034,
+    "pearson_p": 0.0016714872289728428,
+    "mean_wer_compression": 0.5072525031631511
+  },
+  "step3_determinism": {
+    "identical_outputs": 2611,
+    "n": 2611,
+    "deterministic": true,
+    "main_kwargs": {}
+  },
+  "step4_resolution_true": {
+    "reference": "true",
+    "n_boot": 10000,
+    "n_samples": 2611,
+    "min_resolved_gap_wer": 0.14135895623603112,
+    "max_unresolved_gap_wer": 0.032474354810980266,
+    "n_resolved": 20,
+    "n_pairs": 21
+  },
+  "step4_resolution_pseudo": {
+    "reference": "pseudo",
+    "n_boot": 10000,
+    "n_samples": 2611,
+    "min_resolved_gap_wer": 0.11395292593008444,
+    "max_unresolved_gap_wer": 0.0859018532006568,
+    "n_resolved": 18,
+    "n_pairs": 21
+  }
+}

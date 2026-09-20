@@ -1,0 +1,84 @@
+[project]
+name = "stt-benchmarking"
+version = "0.1.0"
+description = "Speech-to-text benchmarking, ensembling and evaluation for Arabic and English (Master's thesis)"
+readme = "README.md"
+authors = [
+    { name = "Abdelrahman Rabah", email = "abdelrahmanrabah1100@gmail.com" }
+]
+requires-python = "==3.10.*"
+# Only direct dependencies are listed; transitive packages are pinned by uv.lock.
+# PyTorch (CUDA 12.8 build) comes first; it is resolved from the pytorch-cu128 index below.
+# vllm, bitsandbytes and cuda-* are intentionally left out.
+dependencies = [
+    "torch==2.9.0",
+    "torchaudio==2.9.0",
+    "torchvision==0.24.0",
+    # Local wheel, resolved through [tool.uv.sources] below
+    "RDIreplacement",
+    "transformers==4.57.1",
+    "datasets==3.6.0",
+    "accelerate==1.9.0",
+    "huggingface_hub==0.36.2",
+    "numpy==1.26.4",
+    "pandas==1.5.3",
+    "scipy==1.15.3",
+    "matplotlib==3.8.4",
+    "tqdm==4.67.1",
+    "reportlab",
+    "python-docx",
+    "Levenshtein==0.27.1",
+    "soundfile==0.13.1",
+    "librosa==0.10.0",
+    "nemo-toolkit==2.3.2",
+    "faster-whisper==1.2.0",
+    "editdistance==0.8.1",
+    "jiwer==3.1.0",
+    "speechbrain==0.5.16",
+    "openai==1.102.0",
+    "pydantic==2.11.7",
+    "praw==7.8.1",
+    "newspaper3k==0.2.8",
+    "langdetect==1.0.9",
+    "kneed==0.8.5",
+    "num2words==0.5.14",
+    "regex==2026.6.28",
+    "pytz==2025.2",
+    "python-dotenv==1.1.1",
+    "colorlog==6.9.0",
+    "python-bidi==0.6.6",
+    "arabic_reshaper==3.0.0",
+    "requests==2.32.5",
+    "fonttools==4.59.0",
+    "ipython==8.37.0",
+    "sentencepiece==0.2.0",
+    "torchcodec==0.8.0",
+    "seaborn==0.13.2",
+]
+
+[dependency-groups]
+# Notebook / Jupyter tooling, only needed for development
+dev = [
+    "ipykernel==6.29.5",
+    "ipywidgets==8.1.7",
+    "nbconvert==7.17.1",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+RDIreplacement = { path = "stt_benchmarking/packages/Master/dist/RDIreplacement-2.1.0-py3-none-any.whl" }
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+# Flat layout: the package lives at the repo root, not under src/
+module-root = ""

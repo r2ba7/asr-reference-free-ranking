@@ -3,6 +3,7 @@ notebooks/
 documents/
 __pycache__/
 reports/
+.vscode/
 
 *.py[cod]
 *.docx

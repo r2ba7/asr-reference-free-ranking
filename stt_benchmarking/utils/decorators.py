@@ -9,17 +9,20 @@ LOGGER = logger.Logger.get_logger(module_name=__name__)
 class Decorators:
     
     @staticmethod
+    @staticmethod
     def calculate_execution_time(func):
         @functools.wraps(func)
         def execution_time_wrapper(*args, **kwargs):
-            start_time = time.time()            
+            start_time = time.perf_counter()
             result = func(*args, **kwargs)
-            end_time = time.time()
-            execution_time = end_time - start_time
+            execution_time = time.perf_counter() - start_time
             minutes = int(execution_time // 60)
             seconds = int(execution_time % 60)
-            function_name = func.__name__
-            LOGGER.info(f"Execution time for function {function_name}: {minutes} minutes {seconds} seconds")
+            LOGGER.info(f"Execution time for function {func.__name__}: "
+                        f"{minutes} minutes {seconds} seconds ({execution_time:.1f}s)")
+            if args and hasattr(args[0], "report"):
+                t = args[0].report.setdefault("timings_seconds", {})
+                t[func.__name__] = round(max(execution_time, t.get(func.__name__, 0.0)), 1)
             return result
         return execution_time_wrapper
     

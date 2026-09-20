@@ -32,9 +32,22 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from . import metrics
+from . import metrics, logger
+
+LOGGER = logger.Logger.get_logger(module_name=__name__)
 
 # ---------- metric accessors (nested BasicSTTMetrics format) ----------
+_PERM_CACHE={}
+
+def _perm_matrix(rx):
+    """All n! permutations of rx, cached. In step 6 the x-vector is rankdata(wer_true),
+    which is identical across all 466 pool subsets, so this is built once."""
+    key=(len(rx),tuple(rx))
+    P=_PERM_CACHE.get(key)
+    if P is None:
+        P=np.array(list(itertools.permutations(rx)),dtype=float)
+        _PERM_CACHE[key]=P
+    return P
 
 def wer_pct(m):
     return m["word_error_rate"]["wer (%)"]
@@ -68,15 +81,16 @@ class EvaluationProtocol:
     def __init__(self, model_samples, voters, ensemble_factory,
                  outdir="protocol_out", n_boot=1000, seed=42,
                  min_pool_size=3, full_ensemble_samples=None,
-                 main_kwargs=None):
+                 main_kwargs=None, suffix=""):
         self.ms = model_samples
         self.voters = list(voters)
         self.ranked_only = [n for n in model_samples if n not in self.voters]
         self.factory = ensemble_factory
         self.main_kwargs = self._filter_main_kwargs(main_kwargs or {})
         self.outdir = outdir
+        self.suffix = f"_{suffix.strip('_')}" if suffix else ""
         self.n_boot = n_boot
-        self.rng = np.random.default_rng(seed)
+        self.seed = seed
         self.min_pool_size = min_pool_size
         os.makedirs(outdir, exist_ok=True)
         common = sorted(set.intersection(*[set(s.keys()) for s in model_samples.values()]))
@@ -173,6 +187,49 @@ class EvaluationProtocol:
     def _true_per_sample(self, name):
         return {p: self.ms[name][p]["metrics"] for p in self.paths}
 
+    @staticmethod
+    def exact_rank_p(x,y,max_exact=9,n_perm=200000,seed=0):
+        """One-tailed exact permutation p-values for Spearman rho and Kendall tau_b
+        from a single shared enumeration. Permuting x preserves its tie structure, so
+        both statistics are monotone in their numerators: rx.ry for rho, the pairwise
+        sign-product sum for tau_b. Above max_exact, seeded Monte-Carlo (see p_method)."""
+        rx=stats.rankdata(x).astype(float)
+        ry=stats.rankdata(y).astype(float)
+        n=len(rx)
+        rho=stats.spearmanr(rx,ry).correlation
+        tau=stats.kendalltau(rx,ry,variant="b").correlation
+        i,j=np.triu_indices(n,1)
+        sy=np.sign(ry[j]-ry[i])
+        exact=n<=max_exact
+        if exact:
+            P=_perm_matrix(rx)
+        else:
+            rng=np.random.default_rng(seed)
+            P=np.stack([rng.permutation(rx) for _ in range(n_perm)])
+        rho_num=P@ry
+        tau_num=np.zeros(len(P))
+        for k in range(len(i)):
+            if sy[k]:
+                tau_num+=np.sign(P[:,j[k]]-P[:,i[k]])*sy[k]
+        obs_rho=float(rx@ry)
+        obs_tau=float(np.sign(rx[j]-rx[i])@sy)
+        eps=1e-9
+        B=len(P)
+        h_rho=int((rho_num>=obs_rho-eps).sum())
+        h_tau=int((tau_num>=obs_tau-eps).sum())
+        return {"spearman":float(rho),
+                "kendall_b":float(tau),
+                "spearman_exact_p_onetailed":float(h_rho/B if exact else (1+h_rho)/(1+B)),
+                "kendall_exact_p_onetailed":float(h_tau/B if exact else (1+h_tau)/(1+B)),
+                "p_method":"exact" if exact else f"monte_carlo_{n_perm}",
+                "n_permutations":int(B),
+                "min_attainable_p":float(1.0/B if exact else 1.0/(1+B))}
+
+    @staticmethod
+    def exact_spearman_p(x,y):
+        r=EvaluationProtocol.exact_rank_p(x,y)
+        return r["spearman"],r["spearman_exact_p_onetailed"]
+
     # ---------- step 0: decorrelation audit ----------
 
     def step0_decorrelation(self):
@@ -205,6 +262,7 @@ class EvaluationProtocol:
         self.report["step0_cross_wer"] = cw
         self.report["step0_err_corr"] = ec
         self.report["step0_flags"] = pd.DataFrame(flags)
+        LOGGER.info(f"Step 0 Finished.")
         return cw, ec
 
     # ---------- step 1: self-agreement bias ----------
@@ -234,20 +292,10 @@ class EvaluationProtocol:
         df["delta_kendall"] = df.kendall_loo - df.kendall_full
         df = df.sort_values("spearman_full").reset_index(drop=True)
         self.report["step1_bias"] = df
+        LOGGER.info(f"Step 1 Finished.")
         return df
 
     # ---------- step 2: system ranking ----------
-
-    @staticmethod
-    def exact_spearman_p(x, y):
-        rx, ry = stats.rankdata(x), stats.rankdata(y)
-        obs = stats.spearmanr(rx, ry).correlation
-        hits = tot = 0
-        for perm in itertools.permutations(rx):
-            tot += 1
-            if np.corrcoef(perm, ry)[0, 1] >= obs - 1e-12:
-                hits += 1
-        return obs, hits / tot
 
     def step2_ranking(self, pool=None, store=True):
         pool = self.voters if pool is None else pool
@@ -269,16 +317,15 @@ class EvaluationProtocol:
         df["rank_true"] = df.wer_true.rank().astype(int)
         df["rank_pseudo"] = df.wer_pseudo_loo.rank().astype(int)
         df["wer_compression"] = df.wer_true - df.wer_pseudo_loo
-        sp, sp_p = self.exact_spearman_p(df.wer_true.values, df.wer_pseudo_loo.values)
-        kd = stats.kendalltau(df.wer_true.values, df.wer_pseudo_loo.values, variant="b")
-        pr = stats.pearsonr(df.wer_true.values, df.wer_pseudo_loo.values)
-        stat = {"n_models": len(df), "spearman": sp, "spearman_exact_p_onetailed": sp_p,
-                "kendall_b": kd.correlation, "kendall_p": kd.pvalue,
-                "pearson": pr[0], "pearson_p": pr[1],
-                "mean_wer_compression": float(df.wer_compression.mean())}
+        rk=self.exact_rank_p(df.wer_true.values,df.wer_pseudo_loo.values)
+        pr=stats.pearsonr(df.wer_true.values,df.wer_pseudo_loo.values)
+        stat={"n_models":len(df),**rk,
+              "pearson":float(pr[0]),"pearson_p":float(pr[1]),
+              "mean_wer_compression":float(df.wer_compression.mean())}
         if store:
             self.report["step2_ranking"] = df
             self.report["step2_stats"] = stat
+            LOGGER.info(f"Step 2 Finished.")
         return df, stat
 
     # ---------- step 3: pipeline diagnostics ----------
@@ -333,11 +380,15 @@ class EvaluationProtocol:
             self.report["step3_determinism"] = {"identical_outputs": same, "n": len(a),
                                                 "deterministic": same == len(a),
                                                 "main_kwargs": dict(self.main_kwargs)}
+        LOGGER.info(f"Step 3 Finished.")
         return df, drop
 
     # ---------- step 4: bootstrap resolution ----------
 
     def step4_bootstrap(self, ref="true"):
+        """Each reference gets its own generator, so a run is reproducible from the
+        seed regardless of which references were bootstrapped before it."""
+        rng = np.random.default_rng(self.seed + (0 if ref == "true" else 1))
         names = list(self.ms)
         if ref == "true":
             per = {n: self._true_per_sample(n) for n in names}
@@ -353,7 +404,7 @@ class EvaluationProtocol:
         wins = {pair: 0 for pair in pairs}
         idx = np.arange(len(cp))
         for _ in range(self.n_boot):
-            s = self.rng.choice(idx, size=len(idx), replace=True)
+            s = rng.choice(idx, size=len(idx), replace=True)
             w = {n: E[n][s].sum() / Lm[n][s].sum() for n in names}
             for a, b in pairs:
                 if w[a] < w[b]:
@@ -373,6 +424,7 @@ class EvaluationProtocol:
             "min_resolved_gap_wer": mdg, "max_unresolved_gap_wer": unres_max,
             "n_resolved": int(df.resolved_95.sum()), "n_pairs": len(df),
         }
+        LOGGER.info(f"Step 4 Finished.")
         return df
 
     # ---------- step 5: baselines (is the ensemble necessary?) ----------
@@ -394,12 +446,10 @@ class EvaluationProtocol:
                 rows.append({"model": name, "n_samples": len(ps),
                              "wer_true": micro_wer(self._true_per_sample(name), ps),
                              "wer_pseudo": micro_wer(sc, ps)})
-            d = pd.DataFrame(rows)
-            sp, sp_p = self.exact_spearman_p(d.wer_true.values, d.wer_pseudo.values)
-            kd = stats.kendalltau(d.wer_true.values, d.wer_pseudo.values, variant="b")
-            return {"reference": label, "n_models": len(d), "spearman": sp,
-                    "spearman_exact_p": sp_p, "kendall_b": kd.correlation,
-                    "mean_abs_wer_err": float((d.wer_true - d.wer_pseudo).abs().mean())}
+            d=pd.DataFrame(rows)
+            rk=self.exact_rank_p(d.wer_true.values,d.wer_pseudo.values)
+            return {"reference":label,"n_models":len(d),**rk,
+                    "mean_abs_wer_err":float((d.wer_true-d.wer_pseudo).abs().mean())}
 
         all_names = list(self.ms)
         out = [
@@ -418,10 +468,54 @@ class EvaluationProtocol:
                                 f"LOO ensemble matched to n-1 (vs {m})"))
         df = pd.DataFrame(out)
         self.report["step5_baselines"] = df
+        LOGGER.info(f"Step 5 Finished.")
         return df
 
     # ---------- step 6: pool ablation, two objectives ----------
+    def _resolvable_pairs(self):
+        """Unordered pairs the human references resolve at the 95% bootstrap bar.
+        Read from step4_pairs_true; empty if step 4 has not been run."""
+        d=self.report.get("step4_pairs_true")
+        if d is None:
+            return None
+        out={}
+        for _,r in d.iterrows():
+            a,b=[t.strip() for t in r["pair"].split("<")]
+            out[frozenset((a,b))]=bool(r["resolved_95"])
+        return out
 
+    @staticmethod
+    def _pair_errors(d,res,pool):
+        """Pairs whose pseudo-reference ordering contradicts the reference-based one.
+        Returns (summary dict, list of per-pair rows). res=None leaves resolvability
+        unknown, in which case the resolvable counts are nan and the flag is None."""
+        t=d.set_index("model")["wer_true"].to_dict()
+        p=d.set_index("model")["wer_pseudo_loo"].to_dict()
+        wrong=0;wrong_res=0;worst=0.0;worst_pair="";rows=[]
+        for a,b in itertools.combinations(t,2):
+            if (p[a]<p[b])==(t[a]<t[b]):
+                continue
+            wrong+=1
+            r=res.get(frozenset((a,b))) if res is not None else None
+            g=abs(t[a]-t[b])
+            tru=a if t[a]<t[b] else b
+            pre=a if p[a]<p[b] else b
+            rows.append({"pool":pool,"k":pool.count("+")+1,
+                         "pair":f"{a}|{b}",
+                         "true_winner":tru,"pred_winner":pre,
+                         "wer_true_a":t[a],"wer_true_b":t[b],
+                         "wer_pseudo_a":p[a],"wer_pseudo_b":p[b],
+                         "gap_wer_true":g,"gap_wer_pseudo":abs(p[a]-p[b]),
+                         "human_resolvable":r})
+            if r:
+                wrong_res+=1
+                if g>worst:
+                    worst=g;worst_pair=f"{a}|{b}"
+        return ({"n_pairs_wrong":wrong,
+                 "n_pairs_wrong_resolvable":float("nan") if res is None else wrong_res,
+                 "worst_wrong_gap_wer":float("nan") if res is None else worst,
+                 "worst_wrong_pair":worst_pair},rows)
+    
     def step6_ablation(self, max_subsets=None):
         """
         For every voter subset (>= min_pool_size), report:
@@ -433,8 +527,13 @@ class EvaluationProtocol:
         subs = [s for k in range(self.min_pool_size, len(self.voters) + 1)
                 for s in itertools.combinations(self.voters, k)]
         if max_subsets:
-            subs = subs[:max_subsets]
-        rows = []
+            V=tuple(self.voters)
+            req=[V]+[tuple(v for v in V if v!=m) for m in V]
+            req=[s for s in req if len(s)>=self.min_pool_size]
+            rest=[s for s in subs if s not in set(req)]
+            subs=req+rest[:max(0,max_subsets-len(req))]
+        res=self._resolvable_pairs()
+        rows = [];errs=[]
         for sub in subs:
             sub = list(sub)
             refs = self._fuse(sub)[0]
@@ -443,13 +542,21 @@ class EvaluationProtocol:
             objA = micro_wer(ens_m, list(ens_m))
             objA_cer = micro_cer(ens_m, list(ens_m))
             try:
-                _, st = self.step2_ranking(pool=sub, store=False)
-                objB, objB_p = st["spearman"], st["spearman_exact_p_onetailed"]
+                d,st=self.step2_ranking(pool=sub,store=False)
+                objB,objB_p=st["spearman"],st["spearman_exact_p_onetailed"]
+                objT,objT_p=st["kendall_b"],st["kendall_exact_p_onetailed"]
+                summ,er=self._pair_errors(d,res,"+".join(sub))
+                errs.extend(er)
             except ValueError:
-                objB, objB_p = float("nan"), float("nan")
-            rows.append({"pool": "+".join(sub), "k": len(sub),
-                         "ensemble_wer_vs_true": objA, "ensemble_cer_vs_true": objA_cer,
-                         "ranking_spearman": objB, "ranking_exact_p": objB_p})
+                objB=objB_p=objT=objT_p=float("nan")
+                summ={"n_pairs_wrong":float("nan"),
+                      "n_pairs_wrong_resolvable":float("nan"),
+                      "worst_wrong_gap_wer":float("nan"),"worst_wrong_pair":""}
+            rows.append({"pool":"+".join(sub),"k":len(sub),
+                         "ensemble_wer_vs_true":objA,"ensemble_cer_vs_true":objA_cer,
+                         "ranking_spearman":objB,"ranking_exact_p":objB_p,
+                         "ranking_kendall_b":objT,"ranking_kendall_exact_p":objT_p,
+                         **summ})
         df = pd.DataFrame(rows)
         full = df[df.k == len(self.voters)].iloc[0]
         contrib = []
@@ -464,9 +571,18 @@ class EvaluationProtocol:
                     "helps_reference_quality": r.ensemble_wer_vs_true > full.ensemble_wer_vs_true,
                     "helps_ranking": bool(r.ranking_spearman >= full.ranking_spearman)
                                      if not np.isnan(r.ranking_spearman) else None,
+                    "delta_pairs_wrong": r.n_pairs_wrong - full.n_pairs_wrong,
+                    "delta_pairs_wrong_resolvable":
+                        r.n_pairs_wrong_resolvable - full.n_pairs_wrong_resolvable,
                 })
         self.report["step6_pools"] = df.sort_values("ensemble_wer_vs_true").reset_index(drop=True)
         self.report["step6_contribution"] = pd.DataFrame(contrib)
+        ed = pd.DataFrame(errs)
+        if len(ed):
+            ed = ed.sort_values(["human_resolvable","gap_wer_true"],
+                                ascending=[False,False]).reset_index(drop=True)
+        self.report["step6_wrong_pairs"] = ed
+        LOGGER.info(f"Step 6 Finished.")
         return df
 
     # ---------- step 7: floor-effect controls ----------
@@ -492,8 +608,9 @@ class EvaluationProtocol:
             })
         df = pd.DataFrame(rows).sort_values("frac_zero_wer_samples", ascending=False).reset_index(drop=True)
         self.report["step7_floor"] = df
+        LOGGER.info(f"Step 7 Finished.")
         return df
-
+    
     # ---------- driver ----------
 
     def run(self, steps=(0, 1, 2, 3, 4, 5, 6, 7), ablation_cap=None):
@@ -516,10 +633,10 @@ class EvaluationProtocol:
         for k, v in self.report.items():
             if isinstance(v, pd.DataFrame):
                 keep_index = k in ("step0_cross_wer", "step0_err_corr")
-                v.to_csv(os.path.join(self.outdir, f"{k}.csv"), index=keep_index)
+                v.to_csv(os.path.join(self.outdir, f"{k}{self.suffix}.csv"), index=keep_index)
             else:
                 scalars[k] = v
-        with open(os.path.join(self.outdir, "scalars.json"), "w") as f:
+        with open(os.path.join(self.outdir, f"scalars{self.suffix}.json"), "w") as f:
             json.dump(scalars, f, indent=2, default=float)
 
     def _print(self):
@@ -531,8 +648,7 @@ class EvaluationProtocol:
                 print(json.dumps(v, indent=2, default=float))
 
 
-def run_protocol(model_samples, voters, ensemble_factory, steps=(0, 1, 2, 3, 4, 5, 6, 7),
+def run_protocol(model_samples, voters, ensemble_factory,  steps=(0, 1, 2, 3, 4, 5, 6, 7),
                  ablation_cap=None, **kw):
     """Single entry point."""
-    return EvaluationProtocol(model_samples, voters, ensemble_factory, **kw).run(
-        steps=steps, ablation_cap=ablation_cap)
+    return EvaluationProtocol(model_samples, voters, ensemble_factory, **kw).run(steps=steps, ablation_cap=ablation_cap)

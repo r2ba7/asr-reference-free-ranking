@@ -21,8 +21,8 @@ class TranscriptFilter:
         self.__verify_mode()
     
     def __verify_mode(self):
-        if self.mode not in ["mean", "iqr"]:
-            raise ValueError("mode should be either mean or iqr.")
+        if self.mode not in ["mean", "iqr", "mad"]:
+            raise ValueError("mode should be mean, iqr, or mad.")
         
     def _calculate_similarity_matrix(self, transcriptions: List[str]) -> pd.DataFrame:
         """Creates an N*N pairwise similarity matrix for all transcriptions."""
@@ -55,10 +55,10 @@ class TranscriptFilter:
         """
         num_transcriptions = len(transcriptions)
         
-        if num_transcriptions < 3:
+        if num_transcriptions < 4:
             return transcriptions, {
                 "status": "Skipped", 
-                "reason": "Need ≥3 transcripts",
+                "reason": "Need ≥4 transcripts",
                 "kept_indices": list(range(num_transcriptions)), 
                 "filtered_indices": []
             }
@@ -86,16 +86,21 @@ class TranscriptFilter:
         gaps = np.diff(sorted_scores)
         if self.mode == "mean":
             significant_gaps = np.where(gaps > np.mean(gaps) + np.std(gaps))[0]
-        else:
+        elif self.mode == "iqr":
             q1, q3 = np.percentile(gaps, [25, 75])
             iqr = q3 - q1
             upper_fence = q3 + (1.5 * iqr)
             significant_gaps = np.where(gaps > upper_fence)[0]
+        else:
+            median = np.median(gaps)
+            mad = np.median(np.abs(gaps - median))
+            scale = 1.4826 * mad
+            significant_gaps = np.where(gaps > median + 3.0 * scale)[0]
 
         if len(significant_gaps) == 0:
             return transcriptions, {
                 "status": "Skipped",
-                "reason": "Cannot compute gaps",
+                "reason": "No significant gap detected; distribution treated as unimodal",
                 "kept_indices": list(range(num_transcriptions)),
                 "filtered_indices": []
             }
@@ -135,16 +140,14 @@ class ROVER:
     """
 
     def __init__(self, model_weights=None, greedy=False):
-        """
-        Args:
-            model_weights (list | None): Precomputed weights for each model. If None -> equal weights.
-            greedy (bool): If True, performs progressive greedy fusion instead of full WTN.
-        """
         self.model_weights = model_weights
         self.greedy = greedy
         self._input_to_fusion = {}
-        self._fusion_results = []
+        self._samples_info = {}
+        self._fusion_results = {}
         self._overall_metrics = None
+        self._fusion_wall_time=None
+        self._fusion_workers=None
 
     # -------------------------------------------------------------------------
     # Core combination
@@ -278,30 +281,27 @@ class ROVER:
         """
         Majority vote + edit-distance tie-break.
         """
-        def vote_slot(slot, slot_weights):
-            cands = [(i, w) for i, w in enumerate(slot) if w is not None]
-            if not cands:
-                return None, {}, 0.0
-            if len(cands) == 1:
-                w = cands[0][1]
-                return w, {w: 1.0}, 1.0
-
-            votes = defaultdict(float)
-            for i, w in cands:
-                votes[w] += slot_weights[i]
-            max_vote = max(votes.values())
-            tied = [w for w, v in votes.items() if v == max_vote]
-            if len(tied) > 1:
-                allw = [w for _, w in cands]
-                scores = {tw: sum(edit_distance(tw, ow) for ow in allw if ow != tw) for tw in tied}
-                mind = min(scores.values())
-                best = [w for w, d in scores.items() if d == mind]
-                chosen = min(best, key=lambda w: (len(w), w))
-            else:
-                chosen = tied[0]
-            total = sum(votes.values())
-            conf = votes[chosen] / total if total > 0 else 0.0
-            return chosen, dict(votes), conf
+        def vote_slot(slot,slot_weights,null_cost=0.5):
+            cands=[(i,w) for i,w in enumerate(slot) if w is not None]
+            if not cands:return None,{},0.0
+            votes=defaultdict(float)
+            for i,w in cands:votes[w]+=slot_weights[i]
+            n_null=sum(slot_weights[i] for i,w in enumerate(slot) if w is None)
+            if n_null>0:votes[None]=n_null*null_cost
+            max_vote=max(votes.values())
+            tied=[w for w,v in votes.items() if v==max_vote]
+            if len(tied)>1:
+                if None in tied and len(tied)>1:tied=[w for w in tied if w is not None] or [None]
+                if len(tied)>1:
+                    allw=[w for _,w in cands]
+                    scores={tw:sum(edit_distance(tw,ow) for ow in allw if ow!=tw) for tw in tied}
+                    mind=min(scores.values())
+                    best=[w for w,d in scores.items() if d==mind]
+                    chosen=min(best,key=lambda w:(len(w),w))
+                else:chosen=tied[0]
+            else:chosen=tied[0]
+            total=sum(votes.values())
+            return chosen,dict(votes),(votes[chosen]/total if total>0 else 0.0)
 
         matrix = wtn["alignment_matrix"]
         if not matrix:
@@ -345,7 +345,7 @@ class ROVER:
             }
         }
     
-    def main(self, filteration_mode="mean", model_weights=None):
+    def main(self, filteration_mode="mean", model_weights=None, substitute=False, normalize_final_letters=True):
         """
         Main ROVER fusion pipeline.
         """
@@ -355,70 +355,95 @@ class ROVER:
             filtered_transcriptions, filtration_metadata = TranscriptFilter(mode=filteration_mode).main(transcriptions_copy)
             wtn = self.build_word_transition_network(filtered_transcriptions)
             result = self.vote_on_wtn(wtn, model_weights)
-            result["fusion_time"] = time.time() - fusion_start
-            result["wtn"] = {
-                "num_slots": wtn["num_slots"],
-                "num_models": wtn["num_models"],
-                "model_indices": wtn["model_indices"],
+            normalized_prediction = text_processing.StandardArabicTextProcessor.main(result["fusion_transcript"], substitute=substitute, normalize_final_letters=normalize_final_letters)
+            num_models = wtn["num_models"]
+            voting_details = []
+            for d in result["voting_details"]:
+                counts = Counter(d["candidates"])
+                missing = num_models - len(d["candidates"])
+                if missing > 0:
+                    counts[None] = missing
+                voting_details.append({
+                    "position": d["slot"],
+                    "final_token": d["chosen_word"],
+                    "token_votes": dict(counts),
+                    "models_voted": num_models,
+                    "vote_distribution": d["vote_distribution"],
+                    "confidence": d["confidence"],
+                })
+            data = {
+                "fusion_transcript": result["fusion_transcript"],
+                "normalized_prediction": normalized_prediction,
+                "fusion_time": time.time() - fusion_start,
+                "confidence_score": result["confidence_score"],
+                "metadata": {
+                    "records_filtration": filtration_metadata,
+                    "reference_selection": {
+                        "strategy_metric": "rover_greedy_wtn" if self.greedy else "rover_full_wtn",
+                        "reference_index": None,
+                    },
+                    "alignment": {
+                        "num_slots": wtn["num_slots"],
+                        "num_models": wtn["num_models"],
+                        "model_indices": wtn["model_indices"],
+                    },
+                    "voting": {
+                        "fusion_tokens": result["fusion_tokens"],
+                        "confidence_score": result["confidence_score"],
+                        "total_models": num_models,
+                        "sequence_length": wtn["num_slots"],
+                        "selection_method": "rover_majority_vote",
+                        "voting_details": voting_details,
+                    },
+                },
             }
-                
-            return {audio_path: result}
+            return {audio_path: data}
         
         def process_item(item):
             audio_path, transcriptions = item
             return fuse_sample(audio_path, transcriptions)
         
+        LOGGER.info(f"Using substitute: {substitute}, Replace Final Char: {normalize_final_letters}")
         if not self.input_to_fusion:
             raise ValueError("Run ROVEREnsemble.combine_models_transcriptions first.")
-        
+
+        wall_start=time.time()
         with ThreadPoolExecutor(max_workers=8) as executor:
-            futures = {executor.submit(process_item, item): item 
-                      for item in self.input_to_fusion.items()}
-            fusion_results = {}
-            
-            for future in tqdm(as_completed(futures), total=len(futures), 
-                             desc="ROVER Fusion..."):
-                result = future.result()
+            futures={executor.submit(process_item,item):item for item in self.input_to_fusion.items()}
+            fusion_results={}
+            for future in tqdm(as_completed(futures),total=len(futures),desc="ROVER Fusion..."):
+                result=future.result()
                 fusion_results.update(result)
-        
-        self._fusion_results = dict(sorted(fusion_results.items()))
+        self._fusion_wall_time=time.time()-wall_start
+        self._fusion_workers=8
+
+        self._samples_info=dict(sorted(fusion_results.items()))
+        self._fusion_results=self._samples_info
     
-    def eval(self, audios_chunk, substitute=False, normalize_final_letters=True):
-        """
-        Evaluate fusion results against ground truth.
-        """
-        LOGGER.info(f"Using substitute: {substitute}, Replace Final Char: {normalize_final_letters}")
-        refs_lookup = {sample["audio_path"]: sample["normalized_transcription"] for sample in audios_chunk}
-        for audio_path in list(self._fusion_results.keys()):
-            if audio_path in self._fusion_results:
-                try:
-                    ref = refs_lookup[audio_path]
-                    hyp = self._fusion_results[audio_path]["fusion_transcript"]
-                    norm_hyp = text_processing.StandardArabicTextProcessor.main(hyp, substitute=substitute, normalize_final_letters=normalize_final_letters)
-                    self._fusion_results[audio_path]["normalized_prediction"] = norm_hyp
-                    self._fusion_results[audio_path]["normalized_transcription"] = ref
-                    
-                    if ref is not None:
-                        sample_metrics = metrics.BasicSTTMetrics.evaluate(
-                            refs=ref, hyps=norm_hyp)
-                        self._fusion_results[audio_path]["metrics"] = sample_metrics
-                    else:
-                        self._fusion_results[audio_path]["metrics"] = helpers._empty_metrics()
-                
-                except Exception as e:
-                    LOGGER.error(f"Error processing {audio_path}: {e}")
-                    self._fusion_results[audio_path] = {
-                        "normalized_prediction": None,
-                        "metrics": helpers._empty_metrics()
-                    }
-            else:
-                self._fusion_results[audio_path] = {
-                    "normalized_prediction": None,
-                    "metrics": helpers._empty_metrics()
-                }
-        # Overall metrics
-        refs = [v["normalized_transcription"] for v in self._fusion_results.values()]
-        hyps = [v["normalized_prediction"] for v in self._fusion_results.values()]
+    def eval(self, audios_chunk):
+        refs_lookup = {s["audio_path"]: s["normalized_transcription"] for s in audios_chunk}
+        for audio_path, entry in self._samples_info.items():
+            ref = refs_lookup.get(audio_path)
+            hyp = entry.get("normalized_prediction")
+            entry["normalized_transcription"] = ref
+            if ref is None or hyp is None:
+                entry["metrics"] = helpers._empty_metrics()
+                entry["eval_error"] = "missing_reference" if ref is None else "missing_hypothesis"
+                continue
+            try:
+                entry["metrics"] = metrics.BasicSTTMetrics.evaluate(refs=ref, hyps=hyp)
+            except Exception as e:
+                LOGGER.error(f"Error evaluating {audio_path}: {e}")
+                entry["metrics"] = helpers._empty_metrics()
+                entry["eval_error"] = str(e)
+        pairs = [(v["normalized_transcription"], v["normalized_prediction"]) for v in self._samples_info.values() if v.get("normalized_transcription") is not None and v.get("normalized_prediction") is not None]
+        skipped = len(self._samples_info) - len(pairs)
+        if skipped:
+            LOGGER.warning(f"Excluded {skipped} samples from overall metrics.")
+        if not pairs:
+            self._overall_metrics = helpers._empty_metrics()
+            return
+        refs, hyps = map(list, zip(*pairs))
         self._overall_metrics = metrics.BasicSTTMetrics.evaluate(refs=refs, hyps=hyps)
     
     def summary_of_evaluation(self):
@@ -433,14 +458,21 @@ class ROVER:
         for k, v in self._overall_metrics.items():
             LOGGER.info(f"{k}: {v}")
     
-    def reset(self):
-        """
-        Reset the ROVER instance.
-        """
-        self._input_to_fusion = {}
-        self._fusion_results = []
-        self._overall_metrics = None
-        LOGGER.info("ROVER ensemble instance has been reset.")
+    @property
+    def samples_info(self):
+        if not self._samples_info:
+            raise ValueError("Run ROVER.main first.")
+        return self._samples_info
+
+    @samples_info.setter
+    def samples_info(self, value):
+        self._samples_info = value
+
+    @property
+    def fusion_results(self):
+        if not self._samples_info:
+            raise ValueError("Run ROVER.main first.")
+        return self._samples_info
     
     @property
     def input_to_fusion(self):
@@ -453,12 +485,17 @@ class ROVER:
         if not isinstance(value, dict):
             raise ValueError("Input to fusion must be a dictionary.")
         self._input_to_fusion = value
-    
+
+    def reset(self):
+        self._input_to_fusion = {}
+        self._samples_info = {}
+        self._fusion_results = {}
+        self._overall_metrics = None
+        LOGGER.info("ROVER ensemble instance has been reset.")
+
     @property
-    def fusion_results(self):
-        if not self._fusion_results:
-            raise ValueError("Run ROVEREnsemble.fusion first.")
-        return self._fusion_results
+    def fusion_wall_time(self):
+        return self._fusion_wall_time
     
     @property
     def overall_metrics(self):

@@ -253,7 +253,7 @@ class ReferenceSelection:
                 for j in range(i + 1, len(valid_transcriptions)):
                     _, t1 = valid_transcriptions[i]
                     _, t2 = valid_transcriptions[j]
-                    matcher = SequenceMatcher(None, t1.split(), t2.split())
+                    matcher = SequenceMatcher(None, t1.split(), t2.split(), autojunk=False)
                     observed_ratios.append(matcher.ratio())
             
             if len(observed_ratios) == 0:
@@ -313,7 +313,7 @@ class ReferenceSelection:
                 """Calculate similarity ratio between two sentences using SequenceMatcher"""
                 if not sentence1 or not sentence2: return 0.0
                 words1, words2 = sentence1.split(), sentence2.split()
-                matcher = SequenceMatcher(None, words1, words2)
+                matcher = SequenceMatcher(None, words1, words2, autojunk=False)
                 return matcher.ratio()
             
             valid_transcriptions = [(i, t) for i, t in enumerate(transcriptions) if t is not None]
@@ -334,64 +334,16 @@ class ReferenceSelection:
                     best_reference = transcription_i
                     best_index = original_i
             
-            if best_reference and best_total_similarity >= 0:
-                num_comparisons = len(valid_transcriptions) - 1 if len(valid_transcriptions) > 1 else 1
-                avg_similarity = best_total_similarity / num_comparisons if num_comparisons > 0 else 0.0
-                metadata = {
-                    'strategy_metric': 'most_common_words',
-                    'score': avg_similarity,
-                    'total_similarity_score': best_total_similarity,
-                    'reference_index': best_index
-                }
-                return True, best_reference, metadata
-            return False, None, None
-
-        def get_longest_reference_fallback(transcriptions):
-            """
-            Fallback when anchor validation fails but we still need a reference.
-            Uses average pairwise similarity to find most representative transcription.
-            """
-            valid_transcriptions = [(i, t) for i, t in enumerate(transcriptions) if t is not None]
-            if not valid_transcriptions:
-                return False, None, None
-            
-            # Calculate average word-level edit distance for each transcription
-            best_avg_similarity = -1
-            best_reference = None
-            best_index = None
-            
-            for original_i, transcription_i in valid_transcriptions:
-                words_i = transcription_i.split()
-                total_similarity = 0.0
-                comparisons = 0
-                
-                for original_j, transcription_j in valid_transcriptions:
-                    if original_i != original_j:
-                        words_j = transcription_j.split()
-                        # Use SequenceMatcher for word-level similarity
-                        matcher = SequenceMatcher(None, words_i, words_j)
-                        total_similarity += matcher.ratio()
-                        comparisons += 1
-                
-                avg_similarity = total_similarity / comparisons if comparisons > 0 else 0.0
-                
-                # Tiebreaker: prefer longer transcription when similarity is equal
-                if avg_similarity > best_avg_similarity or \
-                (avg_similarity == best_avg_similarity and len(transcription_i) > len(best_reference or "")):
-                    best_avg_similarity = avg_similarity
-                    best_reference = transcription_i
-                    best_index = original_i
-            
-            # Success if we found reasonable consensus (>30% similarity)
-            success = best_avg_similarity >= 0.2
+            num_comparisons = len(valid_transcriptions) - 1 if len(valid_transcriptions) > 1 else 1
+            avg_similarity = best_total_similarity / num_comparisons if num_comparisons > 0 else 0.0
             metadata = {
-                'strategy_metric': 'pairwise_similarity',
-                'score': best_avg_similarity,
-                'total_comparisons': comparisons,
+                'strategy_metric': 'most_common_words',
+                'score': avg_similarity,
+                'total_similarity_score': best_total_similarity,
                 'reference_index': best_index
             }
-            return success, best_reference, metadata
-        
+            return True, best_reference, metadata
+
         # Always ensure we have at least one valid transcription to return
         valid_transcriptions = [t for t in transcriptions if t is not None]
         if not valid_transcriptions:
@@ -399,13 +351,8 @@ class ReferenceSelection:
         
         longest_success, longest_reference, reference_metadata = get_longest_reference(transcriptions)
         if longest_success: return "longest", longest_reference, reference_metadata
-
-        common_words_success, common_words_reference, reference_metadata = get_common_words_reference(transcriptions)
-        if common_words_success: return "common_words", common_words_reference, reference_metadata
-
-        fallback_success, fallback_reference, reference_metadata = get_longest_reference_fallback(transcriptions)
-        if fallback_success: return "longest_fallback", fallback_reference, reference_metadata
-        else: return "failed", fallback_reference , reference_metadata   
+        _, common_words_reference, reference_metadata = get_common_words_reference(transcriptions)
+        return "common_words", common_words_reference, reference_metadata
 
 class Alignment:
     def main(self, reference, reference_type, reference_index, transcriptions):
@@ -652,107 +599,12 @@ class Alignment:
             }
             return alignment_results, metadata
         
-        def align_with_longest_fallback_strategy(reference, transcriptions, reference_index=reference_index, reference_type=reference_type):
-            """
-            Fallback alignment when anchor validation fails.
-            
-            Flow:
-            1. Compute pairwise similarity matrix for all valid transcriptions
-            2. Calculate reliability weight for each model (average similarity to others)
-            3. Perform standard word-level alignment (same as longest strategy)
-            4. Attach weight metadata to each alignment result for downstream use
-            
-            Difference from longest strategy:
-            - Longest: High anchor confidence, reference is structural authority
-            - Fallback: Low anchor confidence, reference is "best guess", weights signal reliability
-            
-            Output: Same structure as longest strategy + 'weight' field per model
-            Purpose: Enable weighted voting in consensus step when reference quality is uncertain
-            """
-            alignment_results = []
-            valid_transcriptions = [(i, t) for i, t in enumerate(transcriptions) if t and t.strip()]
-            
-            if len(valid_transcriptions) <= 1:
-                # Degenerate case: use simple alignment without weights
-                return align_with_longest_strategy(reference, transcriptions, reference_index, reference_type)
-            
-            # Calculate pairwise similarities
-            model_weights = {}
-            for i, trans_i in valid_transcriptions:
-                words_i = trans_i.split()
-                total_sim = 0.0
-                comparisons = 0
-                for j, trans_j in valid_transcriptions:
-                    if i != j:
-                        words_j = trans_j.split()
-                        total_sim += SequenceMatcher(None, words_i, words_j).ratio()
-                        comparisons += 1
-                model_weights[i] = total_sim / comparisons if comparisons > 0 else 0.0
-            
-            # Normalize weights to [0, 1]
-            max_weight = max(model_weights.values()) if model_weights else 1.0
-            if max_weight > 0:
-                model_weights = {k: v / max_weight for k, v in model_weights.items()}
-            
-            # Perform standard alignment
-            ref_words = reference.split()
-            for model_index, transcription in enumerate(transcriptions):
-                alignment_result = {
-                    'model_index': model_index,
-                    'reference_type': reference_type,
-                    'is_reference': (model_index == reference_index),
-                    'weight': model_weights.get(model_index, 0.0)  # Reliability score
-                }
-                
-                if model_index == reference_index:
-                    alignment_result['operations'] = ["<KEEP>"] * len(ref_words)
-                    alignment_result['tokens'] = ref_words.copy()
-                else:
-                    if not transcription or not transcription.strip():
-                        alignment_result['operations'] = ["<DELETE>"] * len(ref_words)
-                        alignment_result['tokens'] = [None] * len(ref_words)
-                    else:
-                        trans_words = transcription.split()
-                        operations = ["<DELETE>"] * len(ref_words)
-                        candidate_values = [None] * len(ref_words)
-                        
-                        matcher = SequenceMatcher(None, ref_words, trans_words)
-                        for op, ref_start, ref_end, trans_start, trans_end in matcher.get_opcodes():
-                            if op == 'equal':
-                                for i in range(ref_start, ref_end):
-                                    operations[i] = "<KEEP>"
-                                    candidate_values[i] = ref_words[i]
-                            elif op == 'replace':
-                                for i in range(ref_start, ref_end):
-                                    operations[i] = "<REPLACE>"
-                                    trans_idx = trans_start + (i - ref_start)
-                                    if trans_idx < trans_end:
-                                        candidate_values[i] = trans_words[trans_idx]
-                            elif op == 'delete':
-                                for i in range(ref_start, ref_end):
-                                    operations[i] = "<DELETE>"
-                        
-                        alignment_result['operations'] = operations
-                        alignment_result['tokens'] = candidate_values
-                
-                alignment_results.append(alignment_result)
-            metadata = {
-                'original_reference_tokens': ref_words,
-                'adjusted_reference_tokens': ref_words.copy(), 
-                'model_weights': model_weights # This is the key metadata for this strategy
-            }
-            return alignment_results, metadata
-        
         if reference is None or not transcriptions:
             return []
         if reference_type == "longest":
             alignment_results, alignment_metadata = align_with_longest_strategy(reference=reference, transcriptions=transcriptions, reference_index=reference_index, reference_type=reference_type)
-        elif reference_type == "common_words":
+        else:
             alignment_results, alignment_metadata = align_with_common_words_strategy(reference=reference, transcriptions=transcriptions, reference_index=reference_index, reference_type=reference_type)
-        elif reference_type == "longest_fallback":
-            alignment_results, alignment_metadata = align_with_longest_fallback_strategy(reference=reference, transcriptions=transcriptions, reference_index=reference_index, reference_type=reference_type)
-        elif reference_type == "failed":
-            alignment_results, alignment_metadata = align_with_longest_fallback_strategy(reference=reference, transcriptions=transcriptions, reference_index=reference_index, reference_type=reference_type)
         return alignment_results, alignment_metadata
 
 class TokenLevelVoting:
@@ -925,6 +777,8 @@ class HybridEnsemble:
         self._samples_info = {}
         self._processed_results = []
         self._overall_metrics = None
+        self._fusion_wall_time=None
+        self._fusion_workers=None
 
     def combine_models_transcriptions(self, *samples_dicts, missing_value=""):
         """
@@ -992,16 +846,17 @@ class HybridEnsemble:
         if not self._input_to_fusion:
             raise ValueError("Run EnsembleInference.combine_models_transcriptions first.")
 
-        with ThreadPoolExecutor(max_workers = 8) as executor:
-            futures = {executor.submit(process_item, item): item for item in self.input_to_fusion.items()}
-            samples_info = {}
-            for future in tqdm(as_completed(futures), total=len(futures), desc="Fusing Inputs..."):
+        wall_start=time.time()
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures={executor.submit(process_item,item):item for item in self.input_to_fusion.items()}
+            samples_info={}
+            for future in tqdm(as_completed(futures),total=len(futures),desc="Fusing Inputs..."):
                 try:
-                    result = future.result()
-                    samples_info.update(result)
-
+                    samples_info.update(future.result())
                 except Exception as e:
                     raise RuntimeError(f"Error during fusion for a sample: {e}") from e
+        self._fusion_wall_time=time.time()-wall_start
+        self._fusion_workers=8
                 
         self._samples_info = dict(sorted(samples_info.items()))
 
@@ -1096,3 +951,7 @@ class HybridEnsemble:
     @property
     def overall_metrics(self):
         return self._overall_metrics
+
+    @property
+    def fusion_wall_time(self):
+        return self._fusion_wall_time

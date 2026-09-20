@@ -10,7 +10,6 @@ from stt_benchmarking.utils import (
     helpers, 
     decorators, 
     metrics,
-    text_processing
 )
 
 class FasterWhisperInference:

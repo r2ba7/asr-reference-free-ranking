@@ -662,7 +662,7 @@ class EvaluationProtocol:
     
     # ---------- driver ----------
 
-    def run(self, steps=(0, 1, 2, 3, 4, 5, 6, 7), ablation_cap=None):
+    def run(self, steps=(0, 1, 2, 3, 4, 5, 6, 7, 8), ablation_cap=None):
         if 0 in steps: self.step0_decorrelation()
         if 1 in steps: self.step1_bias()
         if 2 in steps: self.step2_ranking()
@@ -698,7 +698,6 @@ class EvaluationProtocol:
                 print(json.dumps(v, indent=2, default=float))
 
 
-def run_protocol(model_samples, voters, ensemble_factory,  steps=(0, 1, 2, 3, 4, 5, 6, 7),
-                 ablation_cap=None, **kw):
+def run_protocol(model_samples, voters, ensemble_factory,  steps=(0, 1, 2, 3, 4, 5, 6, 7, 8), ablation_cap=None, **kw):
     """Single entry point."""
     return EvaluationProtocol(model_samples, voters, ensemble_factory, **kw).run(steps=steps, ablation_cap=ablation_cap)

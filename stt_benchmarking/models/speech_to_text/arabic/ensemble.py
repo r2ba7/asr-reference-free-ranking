@@ -34,8 +34,8 @@ class TranscriptFilter:
         self.__verify_mode()
     
     def __verify_mode(self):
-        if self.mode not in ["mean", "iqr", "mad"]:
-            raise ValueError("mode should be mean, iqr, or mad.")
+        if self.mode != "mean":
+            raise ValueError("mode should be mean.")
         
     def _calculate_similarity_matrix(self, transcriptions: List[str]) -> pd.DataFrame:
         """Creates an N*N pairwise similarity matrix for all transcriptions."""
@@ -96,19 +96,7 @@ class TranscriptFilter:
         sorted_indices = np.argsort(agreement_scores)
         sorted_scores = agreement_scores[sorted_indices]
         gaps = np.diff(sorted_scores)
-        if self.mode == "mean":
-            significant_gaps = np.where(gaps > np.mean(gaps) + np.std(gaps))[0]
-        elif self.mode == "iqr":
-            q1, q3 = np.percentile(gaps, [25, 75])
-            iqr = q3 - q1
-            upper_fence = q3 + (1.5 * iqr)
-            significant_gaps = np.where(gaps > upper_fence)[0]
-        else:
-            median = np.median(gaps)
-            mad = np.median(np.abs(gaps - median))
-            scale = 1.4826 * mad
-            significant_gaps = np.where(gaps > median + 3.0 * scale)[0]
-
+        significant_gaps = np.where(gaps > np.mean(gaps) + np.std(gaps))[0]
         if len(significant_gaps) == 0:
             return transcriptions, {
                 "status": "Skipped",
@@ -117,6 +105,7 @@ class TranscriptFilter:
                 "filtered_indices": []
             }
         
+        first_gap_idx = significant_gaps[0]
         first_gap_idx = significant_gaps[0]
         dynamic_threshold = sorted_scores[first_gap_idx + 1]
         kept_indices = np.where(agreement_scores >= dynamic_threshold)[0]
@@ -143,14 +132,14 @@ class TranscriptFilter:
         return filtered_transcriptions, metadata
 
 class ReferenceSelection:
-    def __init__(self, lengthmode="mean", matchmode="mean"):
+    def __init__(self, lengthmode="iqr", matchmode="mean"):
         self.lengthmode = lengthmode
         self.matchmode = matchmode
         self.__verify_mode()
     
     def __verify_mode(self):
-        if self.matchmode and self.lengthmode not in ["mean", "iqr"]:
-            raise ValueError("mode should be either mean or iqr.")
+        if self.lengthmode != "iqr" or self.matchmode != "mean":
+            raise ValueError("lengthmode should be iqr and matchmode should be mean.")
         
     def main(self, transcriptions):
         def get_longest_reference(transcriptions):
@@ -189,33 +178,17 @@ class ReferenceSelection:
                     required_ratio = 0.75
                     category = "unknown"
                 else:
-                    lengthmode = length_stats['mode']
-                    matchmode = match_stats['mode']
-                    if lengthmode == "iqr":
-                        q1_len = length_stats['q1']
-                        q3_len = length_stats['q3']
-                        if shorter_sequence_length < q1_len:
-                            category = "short"
-                            required_ratio = match_stats['q3'] if matchmode == "iqr" else match_stats['upper']
-                        elif shorter_sequence_length > q3_len:
-                            category = "long"
-                            required_ratio = match_stats['q1'] if matchmode == "iqr" else match_stats['lower']
-                        else:
-                            category = "mid"
-                            required_ratio = match_stats['median'] if matchmode == "iqr" else match_stats['mean']
-                                        
+                    q1_len = length_stats['q1']
+                    q3_len = length_stats['q3']
+                    if shorter_sequence_length < q1_len:
+                        category = "short"
+                        required_ratio = match_stats['upper']
+                    elif shorter_sequence_length > q3_len:
+                        category = "long"
+                        required_ratio = match_stats['lower']
                     else:
-                        lower_len = length_stats['lower']
-                        upper_len = length_stats['upper']
-                        if shorter_sequence_length < lower_len:
-                            category = "short"
-                            required_ratio = match_stats['upper'] if matchmode == "mean" else match_stats['q3']
-                        elif shorter_sequence_length > upper_len:
-                            category = "long"
-                            required_ratio = match_stats['lower'] if matchmode == "mean" else match_stats['q1']
-                        else:
-                            category = "mid"
-                            required_ratio = match_stats['mean'] if matchmode == "mean" else match_stats['median']
+                        category = "mid"
+                        required_ratio = match_stats['mean']
 
                 min_required = int(np.ceil(shorter_sequence_length * required_ratio))
                 is_valid = additional_matches >= min_required
@@ -236,32 +209,19 @@ class ReferenceSelection:
             if len(all_lengths) < 2:
                 length_stats = None
             else:
-                if self.lengthmode == "iqr":
-                    median_len = np.median(all_lengths)
-                    q1 = np.percentile(all_lengths, 25)
-                    q3 = np.percentile(all_lengths, 75)
-                    iqr = q3 - q1
-                    length_stats = {
-                        'mode': 'iqr',
-                        'median': median_len,
-                        'q1': q1,
-                        'q3': q3,
-                        'iqr': iqr,
-                        'min': min(all_lengths),
-                        'max': max(all_lengths)
-                    }
-                else:
-                    mean_len = np.mean(all_lengths)
-                    std_len = np.std(all_lengths)
-                    length_stats = {
-                        'mode': 'mean',
-                        'mean': mean_len,
-                        'std': std_len,
-                        'lower': mean_len - std_len,
-                        'upper': mean_len + std_len,
-                        'min': min(all_lengths),
-                        'max': max(all_lengths)
-                    }
+                median_len = np.median(all_lengths)
+                q1 = np.percentile(all_lengths, 25)
+                q3 = np.percentile(all_lengths, 75)
+                iqr = q3 - q1
+                length_stats = {
+                    'mode': 'iqr',
+                    'median': median_len,
+                    'q1': q1,
+                    'q3': q3,
+                    'iqr': iqr,
+                    'min': min(all_lengths),
+                    'max': max(all_lengths)
+                }
 
             observed_ratios = []
             for i in range(len(valid_transcriptions)):
@@ -274,21 +234,13 @@ class ReferenceSelection:
             if len(observed_ratios) == 0:   
                 match_stats = None
             else:
-                if self.matchmode == "iqr":
-                    match_stats = {
-                        'mode': 'iqr',
-                        'q1': np.percentile(observed_ratios, 25),
-                        'median': np.median(observed_ratios),
-                        'q3': np.percentile(observed_ratios, 75),
-                    }
-                else:
-                    match_stats = {
-                        'mode': 'mean',
-                        'mean': np.mean(observed_ratios),
-                        'std': np.std(observed_ratios),
-                        'lower': np.mean(observed_ratios) - np.std(observed_ratios),
-                        'upper': np.mean(observed_ratios) + np.std(observed_ratios),
-                    }
+                match_stats = {
+                    'mode': 'mean',
+                    'mean': np.mean(observed_ratios),
+                    'std': np.std(observed_ratios),
+                    'lower': np.mean(observed_ratios) - np.std(observed_ratios),
+                    'upper': np.mean(observed_ratios) + np.std(observed_ratios),
+                }
 
             longest_original_index, longest_reference = max(valid_transcriptions, key=lambda x: (len(x[1]), -_stable_key(x[1])))
             total_comparisons = len(valid_transcriptions) - 1

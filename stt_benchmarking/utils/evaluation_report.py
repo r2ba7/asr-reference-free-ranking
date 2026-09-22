@@ -177,4 +177,5 @@ def main():
         f=root/f"{stem}.pdf";build_pdf(tables,f,title,a.portrait);print(f"wrote {f}")
 
 if __name__=="__main__":
+    # Sample Usage: python -m stt_benchmarking.utils.evaluation_report "E:\Masters\Thesis\Dr. Mohsen Rashwan\projects\stt_benchmarking\notebooks\Phase 1.2\protocol_out\rdi_validated_ensemble" -n rdi_validated_ensemble --no-docx
     main()

@@ -17,14 +17,22 @@ from stt_benchmarking.utils import text_processing, helpers, metrics
 from stt_benchmarking.models.llms import reinforcer
 from . import LOGGER, NORMALIZER_OBJ
 
+def _sym_ratio(w1,w2):
+    """Order-free Ratcliff/Obershelp ratio: the pair is put in canonical order first."""
+    a,b=(w1,w2) if w1<=w2 else (w2,w1)
+    return SequenceMatcher(None,a,b,autojunk=False).ratio()
+
+def _stable_key(s):
+    return int(hashlib.md5(s.encode("utf-8")).hexdigest(),16)
+
 class TranscriptFilter:
     def __init__(self, mode="mean"):
         self.mode = mode
         self.__verify_mode()
     
     def __verify_mode(self):
-        if self.mode not in ["mean", "iqr"]:
-            raise ValueError("mode should be either mean or iqr.")
+        if self.mode != "mean":
+            raise ValueError("mode should be mean.")
         
     def _calculate_similarity_matrix(self, transcriptions: List[str]) -> pd.DataFrame:
         """Creates an N*N pairwise similarity matrix for all transcriptions."""
@@ -32,8 +40,7 @@ class TranscriptFilter:
             """Calculates the similarity ratio (0-100) based on matching *words*."""
             if not words1 and not words2: return 100.0
             if not words1 or not words2: return 0.0
-            matcher = difflib.SequenceMatcher(None, words1, words2, autojunk=False)
-            return matcher.ratio() * 100.0
+            return _sym_ratio(words1, words2) * 100.0
         
         num_systems = len(transcriptions)
         tokenized_trans = [t.split() for t in transcriptions]
@@ -70,7 +77,7 @@ class TranscriptFilter:
         agreement_scores = []
         for i in range(num_transcriptions):
             others_similarity = np.concatenate([similarity_matrix[i, :i], similarity_matrix[i, i+1:]])
-            agreement_scores.append(np.mean(others_similarity))
+            agreement_scores.append(math.fsum(others_similarity) / len(others_similarity))
         
         agreement_scores = np.array(agreement_scores)
         # Check for uniform scores
@@ -86,13 +93,7 @@ class TranscriptFilter:
         sorted_indices = np.argsort(agreement_scores)
         sorted_scores = agreement_scores[sorted_indices]
         gaps = np.diff(sorted_scores)
-        if self.mode == "mean":
-            significant_gaps = np.where(gaps > np.mean(gaps) + np.std(gaps))[0]
-        else:
-            q1, q3 = np.percentile(gaps, [25, 75])
-            iqr = q3 - q1
-            upper_fence = q3 + (1.5 * iqr)
-            significant_gaps = np.where(gaps > upper_fence)[0]
+        significant_gaps = np.where(gaps > np.mean(gaps) + np.std(gaps))[0]
 
         if len(significant_gaps) == 0:
             return transcriptions, {
@@ -128,14 +129,14 @@ class TranscriptFilter:
         return filtered_transcriptions, metadata
 
 class ReferenceSelection:
-    def __init__(self, lengthmode="mean", matchmode="mean"):
+    def __init__(self, lengthmode="iqr", matchmode="mean"):
         self.lengthmode = lengthmode
         self.matchmode = matchmode
         self.__verify_mode()
     
     def __verify_mode(self):
-        if self.matchmode and self.lengthmode not in ["mean", "iqr"]:
-            raise ValueError("mode should be either mean or iqr.")
+        if self.lengthmode != "iqr" or self.matchmode != "mean":
+            raise ValueError("lengthmode should be iqr and matchmode should be mean.")
         
     def main(self, transcriptions):
         def get_longest_reference(transcriptions):
@@ -174,33 +175,17 @@ class ReferenceSelection:
                     required_ratio = 0.75
                     category = "unknown"
                 else:
-                    lengthmode = length_stats['mode']
-                    matchmode = match_stats['mode']
-                    if lengthmode == "iqr":
-                        q1_len = length_stats['q1']
-                        q3_len = length_stats['q3']
-                        if shorter_sequence_length < q1_len:
-                            category = "short"
-                            required_ratio = match_stats['q3'] if matchmode == "iqr" else match_stats['upper']
-                        elif shorter_sequence_length > q3_len:
-                            category = "long"
-                            required_ratio = match_stats['q1'] if matchmode == "iqr" else match_stats['lower']
-                        else:
-                            category = "mid"
-                            required_ratio = match_stats['median'] if matchmode == "iqr" else match_stats['mean']
-                                        
+                    q1_len = length_stats['q1']
+                    q3_len = length_stats['q3']
+                    if shorter_sequence_length < q1_len:
+                        category = "short"
+                        required_ratio = match_stats['upper']
+                    elif shorter_sequence_length > q3_len:
+                        category = "long"
+                        required_ratio = match_stats['lower']
                     else:
-                        lower_len = length_stats['lower']
-                        upper_len = length_stats['upper']
-                        if shorter_sequence_length < lower_len:
-                            category = "short"
-                            required_ratio = match_stats['upper'] if matchmode == "mean" else match_stats['q3']
-                        elif shorter_sequence_length > upper_len:
-                            category = "long"
-                            required_ratio = match_stats['lower'] if matchmode == "mean" else match_stats['q1']
-                        else:
-                            category = "mid"
-                            required_ratio = match_stats['mean'] if matchmode == "mean" else match_stats['median']
+                        category = "mid"
+                        required_ratio = match_stats['mean']
 
                 min_required = int(np.ceil(shorter_sequence_length * required_ratio))
                 is_valid = additional_matches >= min_required
@@ -221,61 +206,40 @@ class ReferenceSelection:
             if len(all_lengths) < 2:
                 length_stats = None
             else:
-                if self.lengthmode == "iqr":
-                    median_len = np.median(all_lengths)
-                    q1 = np.percentile(all_lengths, 25)
-                    q3 = np.percentile(all_lengths, 75)
-                    iqr = q3 - q1
-                    length_stats = {
-                        'mode': 'iqr',
-                        'median': median_len,
-                        'q1': q1,
-                        'q3': q3,
-                        'iqr': iqr,
-                        'min': min(all_lengths),
-                        'max': max(all_lengths)
-                    }
-                else:
-                    mean_len = np.mean(all_lengths)
-                    std_len = np.std(all_lengths)
-                    length_stats = {
-                        'mode': 'mean',
-                        'mean': mean_len,
-                        'std': std_len,
-                        'lower': mean_len - std_len,
-                        'upper': mean_len + std_len,
-                        'min': min(all_lengths),
-                        'max': max(all_lengths)
-                    }
+                median_len = np.median(all_lengths)
+                q1 = np.percentile(all_lengths, 25)
+                q3 = np.percentile(all_lengths, 75)
+                iqr = q3 - q1
+                length_stats = {
+                    'mode': 'iqr',
+                    'median': median_len,
+                    'q1': q1,
+                    'q3': q3,
+                    'iqr': iqr,
+                    'min': min(all_lengths),
+                    'max': max(all_lengths)
+                }
 
             observed_ratios = []
             for i in range(len(valid_transcriptions)):
                 for j in range(i + 1, len(valid_transcriptions)):
                     _, t1 = valid_transcriptions[i]
                     _, t2 = valid_transcriptions[j]
-                    matcher = SequenceMatcher(None, t1.split(), t2.split(), autojunk=False)
-                    observed_ratios.append(matcher.ratio())
+                    observed_ratios.append(_sym_ratio(t1.split(), t2.split()))
             
+            observed_ratios.sort()
             if len(observed_ratios) == 0:
                 match_stats = None
             else:
-                if self.matchmode == "iqr":
-                    match_stats = {
-                        'mode': 'iqr',
-                        'q1': np.percentile(observed_ratios, 25),
-                        'median': np.median(observed_ratios),
-                        'q3': np.percentile(observed_ratios, 75),
-                    }
-                else:
-                    match_stats = {
-                        'mode': 'mean',
-                        'mean': np.mean(observed_ratios),
-                        'std': np.std(observed_ratios),
-                        'lower': np.mean(observed_ratios) - np.std(observed_ratios),
-                        'upper': np.mean(observed_ratios) + np.std(observed_ratios),
-                    }
+                match_stats = {
+                    'mode': 'mean',
+                    'mean': np.mean(observed_ratios),
+                    'std': np.std(observed_ratios),
+                    'lower': np.mean(observed_ratios) - np.std(observed_ratios),
+                    'upper': np.mean(observed_ratios) + np.std(observed_ratios),
+                }
 
-            longest_original_index, longest_reference = max(valid_transcriptions, key=lambda x: len(x[1]))
+            longest_original_index, longest_reference = max(valid_transcriptions, key=lambda x: (len(x[1]), -_stable_key(x[1])))
             total_comparisons = len(valid_transcriptions) - 1
             anchor_metadata_list = []
             successful_alignments = 0
@@ -312,27 +276,20 @@ class ReferenceSelection:
             def calculate_similarity(sentence1, sentence2):
                 """Calculate similarity ratio between two sentences using SequenceMatcher"""
                 if not sentence1 or not sentence2: return 0.0
-                words1, words2 = sentence1.split(), sentence2.split()
-                matcher = SequenceMatcher(None, words1, words2, autojunk=False)
-                return matcher.ratio()
+                return _sym_ratio(sentence1.split(), sentence2.split())
             
             valid_transcriptions = [(i, t) for i, t in enumerate(transcriptions) if t is not None]
             if not valid_transcriptions:
                 return False, None, None
 
-            best_total_similarity = -1
-            best_reference, best_index = None, None
+            totals = []
             for original_i, transcription_i in valid_transcriptions:
-                total_similarity = 0.0
-                for original_j, transcription_j in valid_transcriptions:
-                    if original_i != original_j:
-                        similarity = calculate_similarity(transcription_i, transcription_j)
-                        total_similarity += similarity
-                
-                if total_similarity > best_total_similarity:
-                    best_total_similarity = total_similarity
-                    best_reference = transcription_i
-                    best_index = original_i
+                total_similarity = math.fsum(calculate_similarity(transcription_i, transcription_j)
+                                             for original_j, transcription_j in valid_transcriptions
+                                             if original_j != original_i)
+                totals.append((total_similarity, original_i, transcription_i))
+            best_total_similarity, best_index, best_reference = max(
+                totals, key=lambda x: (x[0], -_stable_key(x[2])))
             
             num_comparisons = len(valid_transcriptions) - 1 if len(valid_transcriptions) > 1 else 1
             avg_similarity = best_total_similarity / num_comparisons if num_comparisons > 0 else 0.0

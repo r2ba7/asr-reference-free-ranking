@@ -189,4 +189,5 @@ def main():
         f=root/f"{stem}.pdf";build_pdf(tables,f,title,a.portrait);print(f"wrote {f}")
 
 if __name__=="__main__":
+    # Usage: uv run python -m stt_benchmarking.utils.deployment_report "E:\Masters\Thesis\Dr. Mohsen Rashwan\projects\stt_benchmarking\notebooks\Phase 1.2\deployment_out\rdi_validated_voters_ensemble" -n rdi_validated_voters --no-docx
     main()

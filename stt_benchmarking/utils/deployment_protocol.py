@@ -336,14 +336,14 @@ class DeploymentProtocol:
             self.report["model_filtration"]=agg
         return agg
 
-    def _pool_weights(self, subs, fbar, exponent=1.0):
-        """w(S) = sum over members of (1 - f-bar)^e: the expected number of
+    def _pool_weights(self, subs, fbar):
+        """w(S) = sum over members of (1 - f-bar): the expected number of
         hypotheses that survive the filter and vote in S. A member the filter almost
         always removes contributes almost nothing, so a pool is not penalised for
         carrying one; a member that survives and disagrees counts in full. Pool size
         enters through the sum rather than a separate term, and no threshold is
         introduced. Weights are normalised over the enumeration."""
-        w=np.array([sum((1.0-fbar[m])**exponent for m in sub) for sub in subs],float)
+        w=np.array([sum(1.0-fbar[m] for m in sub) for sub in subs],float)
         return w/w.sum()
     
     def _subpool_counts(self, sub):
@@ -358,7 +358,7 @@ class DeploymentProtocol:
     
     @decorators.Decorators.calculate_execution_time
     def rank_distribution(self, min_rank_pool=None, weighting="uniform",
-                          exponent=1.0, store=True):
+                          store=True):
         """P(model at rank r), estimated by an exhaustive enumeration of voter
         subsets with an utterance bootstrap inside each.
 
@@ -386,7 +386,7 @@ class DeploymentProtocol:
         rng = np.random.default_rng(self.seed)
         if weighting == "filtration":
             fbar = self.model_filtration(subs).set_index("model")["f_bar"].to_dict()
-            wts = self._pool_weights(subs, fbar, exponent)
+            wts = self._pool_weights(subs, fbar)
         elif weighting == "uniform":
             wts = np.full(len(subs), 1.0 / len(subs))
         else:
@@ -484,7 +484,7 @@ class DeploymentProtocol:
                 "n_scorings": len(self._score_cache),
                 "seconds_fuse_and_score": round(t_counts, 1),
                 "seconds_bootstrap": round(t_boot, 1),
-                "weighting": weighting, "exponent": float(exponent),
+                "weighting": weighting,
                 "mean_entropy": float(H.mean()), "max_entropy": float(H.max()),
                 "n_models_modal_differs_from_full": int((~conf.agrees_with_full).sum())}
 
@@ -500,11 +500,11 @@ class DeploymentProtocol:
 
     # ---------- driver ----------
     @decorators.Decorators.calculate_execution_time
-    def run(self, ranks=True, weighting="uniform", exponent=1.0):
+    def run(self, ranks=True, weighting="uniform"):
         self.cross_wer()
         self.ranking()
         if self.mode == self.MODE_LIVE and ranks:
-            self.rank_distribution(weighting=weighting, exponent=exponent)
+            self.rank_distribution(weighting=weighting)
         self._dump()
         LOGGER.info("Deployment protocol finished.")
         return self.report

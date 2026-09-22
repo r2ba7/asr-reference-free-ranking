@@ -1,0 +1,7 @@
+perm,order,n,identical,differing,identical_frac
+0,cohere+wav2vec_sb+hubert+w2vbert+fastconformer+whisper_v3+seamless_m4t,10495,10495,0,1.0
+1,fastconformer+hubert+w2vbert+seamless_m4t+whisper_v3+cohere+wav2vec_sb,10495,10495,0,1.0
+2,hubert+cohere+w2vbert+wav2vec_sb+seamless_m4t+fastconformer+whisper_v3,10495,10495,0,1.0
+3,cohere+seamless_m4t+hubert+fastconformer+w2vbert+whisper_v3+wav2vec_sb,10495,10495,0,1.0
+4,wav2vec_sb+w2vbert+fastconformer+seamless_m4t+whisper_v3+cohere+hubert,10495,10495,0,1.0
+5,cohere+wav2vec_sb+seamless_m4t+w2vbert+fastconformer+whisper_v3+hubert,10495,10495,0,1.0

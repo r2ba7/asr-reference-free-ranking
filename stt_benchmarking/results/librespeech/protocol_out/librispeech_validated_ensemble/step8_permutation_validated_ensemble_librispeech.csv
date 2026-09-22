@@ -1,0 +1,7 @@
+perm,order,n,identical,differing,identical_frac
+0,cohere+sb+parakeet+whisper_v3+seamless_m4t,2611,2611,0,1.0
+1,parakeet+cohere+sb+seamless_m4t+whisper_v3,2611,2611,0,1.0
+2,seamless_m4t+cohere+parakeet+sb+whisper_v3,2611,2611,0,1.0
+3,cohere+whisper_v3+sb+parakeet+seamless_m4t,2611,2611,0,1.0
+4,cohere+seamless_m4t+parakeet+sb+whisper_v3,2611,2611,0,1.0
+5,whisper_v3+sb+parakeet+seamless_m4t+cohere,2611,2611,0,1.0

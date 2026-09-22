@@ -1,0 +1,22 @@
+pair,adjacent,gap_wer,preserved_frac,resolved_95
+canary < conformer,True,0.068760027504011,0.8394,False
+cohere < parakeet,True,0.07408983896709342,0.9308,False
+parakeet < canary,True,0.09179056363511551,0.9434,False
+seamless_m4t < whisper_v3,True,0.09490472020582064,0.6378,False
+parakeet < conformer,False,0.1605505911391265,0.9964,True
+cohere < canary,False,0.16588040260220893,0.9965,True
+cohere < conformer,False,0.23464043010621993,0.9998,True
+sb < seamless_m4t,True,0.2750250641516321,0.9999,True
+conformer < sb,True,0.3135829001012276,1.0,True
+sb < whisper_v3,False,0.3699297843574527,0.9641,True
+canary < sb,False,0.3823429276052386,1.0,True
+parakeet < sb,False,0.4741334912403541,1.0,True
+cohere < sb,False,0.5482233302074475,1.0,True
+conformer < seamless_m4t,False,0.5886079642528597,1.0,True
+canary < seamless_m4t,False,0.6573679917568707,1.0,True
+conformer < whisper_v3,False,0.6835126844586803,1.0,True
+parakeet < seamless_m4t,False,0.7491585553919862,1.0,True
+canary < whisper_v3,False,0.7522727119626913,1.0,True
+cohere < seamless_m4t,False,0.8232483943590796,1.0,True
+parakeet < whisper_v3,False,0.8440632755978068,1.0,True
+cohere < whisper_v3,False,0.9181531145649002,1.0,True

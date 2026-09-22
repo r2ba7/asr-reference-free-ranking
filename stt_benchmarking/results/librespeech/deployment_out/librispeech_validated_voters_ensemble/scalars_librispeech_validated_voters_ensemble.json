@@ -1,0 +1,27 @@
+{
+  "n_samples": 2611,
+  "main_kwargs_applied": {},
+  "timings_seconds": {
+    "cross_wer": 0.7,
+    "ranking": 23.2,
+    "model_filtration": 5.1,
+    "rank_distribution": 27.0
+  },
+  "ranking_stats": {
+    "n_models": 5,
+    "pool": "seamless_m4t+whisper_v3+parakeet+sb+cohere"
+  },
+  "rank_distribution_summary": {
+    "n_subpools": 6,
+    "n_boot_inner": 1000,
+    "n_fusions": 16,
+    "n_scorings": 25,
+    "seconds_fuse_and_score": 21.7,
+    "seconds_bootstrap": 0.3,
+    "weighting": "filtration",
+    "exponent": 1.0,
+    "mean_entropy": 0.33782644100672454,
+    "max_entropy": 0.4755004521800619,
+    "n_models_modal_differs_from_full": 0
+  }
+}

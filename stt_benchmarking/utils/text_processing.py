@@ -225,11 +225,17 @@ class StandardArabicTextProcessor:
         processed_texts = StandardArabicTextProcessor.convert_numbers_to_arabic_text(processed_texts)
 
         if substitute:
-            processed_texts = SUBSTITUTE_OBJ(
-                text=processed_texts,
-                is_corpus=False,
-                is_asmo=False
-            )
+            # Reproduces the normalization of the saved references and hypotheses:
+            # is_corpus=False treats the first token as an utterance ID and leaves it
+            # unsubstituted. Empty transcripts pass through, since the package cannot
+            # split an empty string.
+            non_empty=[i for i,t in enumerate(processed_texts) if t.strip()]
+            out=list(processed_texts)
+            if non_empty:
+                replaced=SUBSTITUTE_OBJ(text=[processed_texts[i] for i in non_empty],is_corpus=False,is_asmo=False)
+                for i,r in zip(non_empty,replaced):
+                    out[i]=r
+            processed_texts=out
 
         if normalize_final_letters:
             processed_texts = [

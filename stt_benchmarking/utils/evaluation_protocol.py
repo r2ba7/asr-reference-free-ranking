@@ -610,6 +610,55 @@ class EvaluationProtocol:
         self.report["step7_floor"] = df
         LOGGER.info(f"Step 7 Finished.")
         return df
+
+    # ---------- step 8: permutation invariance ----------
+
+    def step8_permutation(self,n_perm=5,include_reversed=True):
+        """Fuse the full voter pool under random input orders and compare every
+        transcript string by string with the canonical-order fusion. Order invariance
+        holds by construction except for exact ties in reference selection, which are
+        broken by input position; this counts how often that changes an output."""
+        rng=np.random.default_rng(self.seed+8)
+        canon=list(self.voters)
+        base_refs,base_meta,_=self._fuse(canon)
+        orders=[]
+        if include_reversed:
+            orders.append(canon[::-1])
+        seen={tuple(canon)}|{tuple(o) for o in orders}
+        while len(orders)<n_perm+int(include_reversed):
+            o=list(rng.permutation(canon))
+            if tuple(o) not in seen:
+                seen.add(tuple(o));orders.append(o)
+        rows=[];diffs=[]
+        for k,order in enumerate(orders):
+            ens=self.factory()
+            ens.combine_models_transcriptions(*[self.ms[n] for n in order])
+            ens.main(**self.main_kwargs)
+            si=ens.samples_info
+            same=0
+            for p,ref in base_refs.items():
+                out=si.get(p,{}).get("normalized_prediction")
+                if out==ref:
+                    same+=1
+                    continue
+                bm=base_meta[p]["reference_selection"];pm=si[p]["metadata"]["reference_selection"] if p in si else {}
+                diffs.append({"perm":k,"order":"+".join(order),"path":p,
+                              "canonical":ref,"permuted":out,
+                              "refsel_canonical":bm.get("strategy_metric","unknown"),
+                              "refsel_permuted":pm.get("strategy_metric","unknown")})
+            rows.append({"perm":k,"order":"+".join(order),"n":len(base_refs),
+                         "identical":same,"differing":len(base_refs)-same,
+                         "identical_frac":same/len(base_refs) if base_refs else float("nan")})
+            LOGGER.info(f"Step 8 permutation {k}: {same}/{len(base_refs)} identical.")
+        df=pd.DataFrame(rows)
+        self.report["step8_permutation"]=df
+        self.report["step8_permutation_diffs"]=pd.DataFrame(diffs)
+        self.report["step8_permutation_summary"]={
+            "canonical_order":"+".join(canon),"n_orders":len(orders),
+            "n_transcripts":len(base_refs),"total_differing":int(df.differing.sum()),
+            "invariant":bool((df.differing==0).all()),"main_kwargs":dict(self.main_kwargs)}
+        LOGGER.info(f"Step 8 Finished.")
+        return df
     
     # ---------- driver ----------
 
@@ -624,6 +673,7 @@ class EvaluationProtocol:
         if 5 in steps: self.step5_baselines()
         if 6 in steps: self.step6_ablation(max_subsets=ablation_cap)
         if 7 in steps: self.step7_floor()
+        if 8 in steps: self.step8_permutation()
         self._dump()
         self._print()
         return self.report

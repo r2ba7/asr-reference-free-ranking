@@ -7,6 +7,7 @@ reports/
 .env
 .venv/
 .venv-hubert/
+paper/
 
 *.py[cod]
 *.docx

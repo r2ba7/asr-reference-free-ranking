@@ -14,8 +14,6 @@ dependencies = [
     "torch==2.9.0",
     "torchaudio==2.9.0",
     "torchvision==0.24.0",
-    # Local wheel, resolved through [tool.uv.sources] below
-    "RDIreplacement",
     "datasets==3.6.0",
     "accelerate==1.9.0",
     "numpy==1.26.4",
@@ -102,7 +100,6 @@ explicit = true
 torch = { index = "pytorch-cu128" }
 torchaudio = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
-RDIreplacement = { path = "stt_benchmarking/packages/Master/dist/RDIreplacement-2.1.0-py3-none-any.whl" }
 
 [build-system]
 requires = ["uv_build>=0.12.17,<0.13.0"]

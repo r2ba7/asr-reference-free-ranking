@@ -1,9 +1,18 @@
 # STT Benchmarking
 
-Speech-to-text benchmarking, ensembling (ROVER and LLM-based fusion) and reference-free
-evaluation for Arabic and English. Managed with [uv](https://docs.astral.sh/uv/); Python 3.10.
+Speech-to-text benchmarking, deterministic consensus fusion with a ROVER baseline, and reference-free evaluation for Arabic and English. An optional LLM refinement stage exists in the pipeline but is disabled in every run; no published result depends on it. Managed with [uv](https://docs.astral.sh/uv/); Python 3.10.
 
 The code lives in the `stt_benchmarking/` package (flat layout, installed in editable mode).
+
+## RDI corpus and substitution package
+
+The dictionary substitution used for RDI is part of the RDI dataset rather than of this
+code, and is released with the dataset. The RDI corpus is not currently distributed, so the
+package is not either; if the dataset is released, the package goes with it.
+
+Common Voice Arabic and LibriSpeech reproduce from a clean install. RDI results can be
+audited against the released outputs but not regenerated: calling the fusion with
+`substitute=True` requires that package and raises otherwise.
 
 ## Environments
 
@@ -37,15 +46,10 @@ All three also install the `dev` group (ipykernel, ipywidgets, nbconvert). Share
 3. **FFmpeg 7.x, shared build** on `PATH`, for `torchaudio.load` (via `torchcodec`):
    `winget install Gyan.FFmpeg.Shared --version 7.1.1`. FFmpeg 9 does not work with
    torchcodec 0.8, and the "essentials" build has no DLLs.
-4. **Python UTF-8 mode**: `setx PYTHONUTF8 1`, then restart VS Code. `RDIreplacement` opens its
-   list files without an encoding and fails on the default Windows code page.
-5. **Developer Mode** (Settings, For developers): speechbrain 0.5 creates symlinks when it
+4. **Developer Mode** (Settings, For developers): speechbrain 0.5 creates symlinks when it
    downloads models, which needs it on Windows.
 
 ### Create the environments
-
-`RDIreplacement` is installed from the local wheel in
-`stt_benchmarking/packages/Master/dist/`.
 
 Main environment (`.venv`, the default):
 
@@ -113,9 +117,8 @@ is imported. Import `stt_benchmarking` before `torchaudio` or `speechbrain`.
 
 | Symptom                                                           | Cause and fix                                                             |
 | ----------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| `UnicodeDecodeError: 'charmap' codec` in `RDIreplacement`         | Enable UTF-8 mode (prerequisite 4)                                        |
 | `Could not load libtorchcodec`                                    | Install FFmpeg 7.x shared (prerequisite 3); import `stt_benchmarking` first |
-| `WinError 1314 ... required privilege` when loading speechbrain   | Enable Developer Mode (prerequisite 5)                                    |
+| `WinError 1314 ... required privilege` when loading speechbrain   | Enable Developer Mode (prerequisite 4)                                    |
 | `No module named 'speechbrain.inference'`                         | Wrong environment: use `.venv` (speechbrain 1.x) for those models         |
 | `There is no such class as ...HuggingFaceWav2Vec2`                | Wrong environment: use `.venv-hubert`                                     |
 | `cannot import name 'CohereAsrForConditionalGeneration'`          | Wrong environment: use `.venv-cohere`                                     |

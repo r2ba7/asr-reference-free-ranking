@@ -3,12 +3,13 @@ import re
 from typing import Union, List
 import unicodedata
 
-import torch
 from num2words import num2words
 
-from RDIreplacement.substitute import substitute
-
-SUBSTITUTE_OBJ = substitute()
+try:
+    from RDIreplacement.substitute import substitute
+    SUBSTITUTE_OBJ = substitute()
+except ImportError:
+    SUBSTITUTE_OBJ = None
 
 class StandardArabicTextProcessor:
     """
@@ -225,6 +226,11 @@ class StandardArabicTextProcessor:
         processed_texts = StandardArabicTextProcessor.convert_numbers_to_arabic_text(processed_texts)
 
         if substitute:
+            if SUBSTITUTE_OBJ is None:
+                raise RuntimeError(
+                    "substitute=True requires the RDI substitution package, which is "
+                    "distributed with the RDI corpus and is not released here."
+                )
             # Reproduces the normalization of the saved references and hypotheses:
             # is_corpus=False treats the first token as an utterance ID and leaves it
             # unsubstituted. Empty transcripts pass through, since the package cannot

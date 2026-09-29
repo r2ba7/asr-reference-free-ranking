@@ -2866,20 +2866,6 @@ wheels = [
 ]
 
 [[package]]
-name = "rdireplacement"
-version = "2.1.0"
-source = { path = "stt_benchmarking/packages/Master/dist/RDIreplacement-2.1.0-py3-none-any.whl" }
-dependencies = [
-    { name = "tqdm" },
-]
-wheels = [
-    { filename = "rdireplacement-2.1.0-py3-none-any.whl", hash = "sha256:e8ac35b6e24311c3ab57da5697e067fc5befd07e4983353a5e5a4943a2a68706" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "tqdm" }]
-
-[[package]]
 name = "referencing"
 version = "0.37.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3387,7 +3373,6 @@ dependencies = [
     { name = "python-docx" },
     { name = "python-dotenv" },
     { name = "pytz" },
-    { name = "rdireplacement" },
     { name = "regex" },
     { name = "reportlab" },
     { name = "requests" },
@@ -3453,7 +3438,6 @@ requires-dist = [
     { name = "python-docx" },
     { name = "python-dotenv", specifier = "==1.1.1" },
     { name = "pytz", specifier = "==2025.2" },
-    { name = "rdireplacement", path = "stt_benchmarking/packages/Master/dist/RDIreplacement-2.1.0-py3-none-any.whl" },
     { name = "regex", specifier = "==2026.6.28" },
     { name = "reportlab" },
     { name = "requests", specifier = "==2.32.5" },
